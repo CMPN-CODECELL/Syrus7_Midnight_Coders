@@ -79,7 +79,7 @@ class KillSwitchService:
 
     def _seed_sample_incidents(self) -> None:
         """Seed realistic forensic incidents for observability."""
-        past_time = datetime.now(timezone.utc) - timedelta(hours=2)
+        now = datetime.now(timezone.utc)
         self.incident_history.append(
             KillSwitchReport(
                 incident_id="inc_009f41b2",
@@ -93,7 +93,55 @@ class KillSwitchService:
                 elapsed_seconds=0.185,
                 completed_within_sla=True,
                 message="Strategy strat_breakout squared off safely in 0.19s.",
-                timestamp=past_time,
+                timestamp=now - timedelta(hours=3, minutes=15),
+            )
+        )
+        self.incident_history.append(
+            KillSwitchReport(
+                incident_id="inc_014a8b71",
+                scope="CANCEL_ONLY",
+                trigger_source="AUTO_CONSECUTIVE_REJECTIONS",
+                reason="Auto-Trip: 3 Consecutive Broker Order Rejections",
+                target_id=None,
+                result=KillSwitchResult.VERIFIED,
+                orders_cancelled_count=4,
+                positions_closed_count=0,
+                elapsed_seconds=0.112,
+                completed_within_sla=True,
+                message="Soft Halt: Cancelled 4 in-flight working orders while preserving open positions.",
+                timestamp=now - timedelta(hours=1, minutes=45),
+            )
+        )
+        self.incident_history.append(
+            KillSwitchReport(
+                incident_id="inc_028e39f4",
+                scope="SYMBOL",
+                trigger_source="MANUAL_USER",
+                reason="Manual Instrument Freeze on RELIANCE during volatility spike",
+                target_id="RELIANCE",
+                result=KillSwitchResult.VERIFIED,
+                orders_cancelled_count=1,
+                positions_closed_count=1,
+                elapsed_seconds=0.240,
+                completed_within_sla=True,
+                message="RELIANCE open orders cancelled and position squared off cleanly.",
+                timestamp=now - timedelta(minutes=45),
+            )
+        )
+        self.incident_history.append(
+            KillSwitchReport(
+                incident_id="inc_039f90e2",
+                scope="GLOBAL",
+                trigger_source="MANUAL_USER",
+                reason="Platform Resilience Verification Test",
+                target_id=None,
+                result=KillSwitchResult.VERIFIED,
+                orders_cancelled_count=5,
+                positions_closed_count=3,
+                elapsed_seconds=0.310,
+                completed_within_sla=True,
+                message="GLOBAL Lockdown: Liquidated all positions and verified flat account exposure in 0.31s.",
+                timestamp=now - timedelta(minutes=10),
             )
         )
 

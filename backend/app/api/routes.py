@@ -54,14 +54,19 @@ kill_switch = KillSwitchService(risk_engine=risk_engine, strategy_manager=manage
 exec_engine = ExecutionEngine(strategy_manager=manager, risk_engine=risk_engine, broker=broker)
 recovery_service = RecoveryService(strategy_manager=manager, risk_engine=risk_engine, broker=broker)
 
-# Register the 3 hackathon strategies
+# Register the hackathon strategies with rich demonstration state
 strat1 = TimeBasedStrategy(
     strategy_id="strat_time",
     name="Strategy 1: TimeBased (09:15 Entry, 15:15 Exit)",
     symbol="RELIANCE",
-    quantity=1,
+    quantity=5,
 )
 strat1.realized_pnl_paise = 145000
+strat1.positions["RELIANCE"] = {"net_qty": 5, "buy_qty": 10, "sell_qty": 5, "buy_val_paise": 1422500, "sell_val_paise": 713100}
+strat1.fills.extend([
+    {"side": "BUY", "quantity": 10, "price_paise": 142250, "time": "09:15:02"},
+    {"side": "SELL", "quantity": 5, "price_paise": 142620, "time": "11:30:15"},
+])
 strat1.log_signal(Side.BUY, 284500, "Time Entry executed at 09:15 AM IST")
 strat1.log_signal(Side.SELL, 286000, "Target Profit hit (+0.52%) on RELIANCE")
 
@@ -69,9 +74,14 @@ strat2 = BreakoutStrategy(
     strategy_id="strat_breakout",
     name="Strategy 2: 1% Breakout (+5% Target / -5% SL)",
     symbol="INFY",
-    quantity=1,
+    quantity=10,
 )
 strat2.realized_pnl_paise = 85000
+strat2.positions["INFY"] = {"net_qty": 10, "buy_qty": 15, "sell_qty": 5, "buy_val_paise": 2235000, "sell_val_paise": 760000}
+strat2.fills.extend([
+    {"side": "BUY", "quantity": 15, "price_paise": 149000, "time": "10:12:44"},
+    {"side": "SELL", "quantity": 5, "price_paise": 152000, "time": "13:45:10"},
+])
 strat2.log_signal(Side.BUY, 142800, "1.0% Upward Breakout triggered from Open (₹1414.00)")
 strat2.log_signal(Side.SELL, 149950, "5.0% Profit Target achieved (+₹71.50/share)")
 
@@ -79,21 +89,58 @@ strat3 = MovingAverageCrossStrategy(
     strategy_id="strat_ma",
     name="Strategy 3: MA Crossover on 1m Candles",
     symbol="TCS",
-    quantity=1,
+    quantity=4,
     fast_period=5,
     slow_period=20,
 )
-strat3.realized_pnl_paise = 15000
-strat3.log_signal(Side.BUY, 352000, "Bullish Golden Cross: Fast SMA (5) crossed above Slow SMA (20)")
+strat3.realized_pnl_paise = 35000
+strat3.positions["TCS"] = {"net_qty": -4, "buy_qty": 4, "sell_qty": 8, "buy_val_paise": 1364000, "sell_val_paise": 2736000}
+strat3.fills.extend([
+    {"side": "SELL", "quantity": 8, "price_paise": 342000, "time": "09:45:00"},
+    {"side": "BUY", "quantity": 4, "price_paise": 341000, "time": "12:10:30"},
+])
+strat3.log_signal(Side.SELL, 342000, "Bearish Death Cross: Fast SMA (5) crossed below Slow SMA (20)")
+strat3.log_signal(Side.BUY, 341000, "Short Profit Locked In (+₹10.00/share)")
+
+strat4 = BreakoutStrategy(
+    strategy_id="strat_momentum",
+    name="Strategy 4: Alpha Momentum Scalper",
+    symbol="HDFCBANK",
+    quantity=15,
+)
+strat4.realized_pnl_paise = 124000
+strat4.positions["HDFCBANK"] = {"net_qty": 15, "buy_qty": 25, "sell_qty": 10, "buy_val_paise": 4112500, "sell_val_paise": 1668000}
+strat4.fills.extend([
+    {"side": "BUY", "quantity": 25, "price_paise": 164500, "time": "09:30:15"},
+    {"side": "SELL", "quantity": 10, "price_paise": 166800, "time": "10:45:22"},
+])
+strat4.log_signal(Side.BUY, 164500, "Banking Sector Momentum Spike (+1.8% Volume Surge)")
+strat4.log_signal(Side.SELL, 166800, "Partial Profit Realized (+₹23.00/share)")
+
+strat5 = TimeBasedStrategy(
+    strategy_id="strat_mean_reversion",
+    name="Strategy 5: Intraday VWAP Mean Reversion",
+    symbol="TATAMOTORS",
+    quantity=20,
+)
+strat5.realized_pnl_paise = 56000
+strat5.positions["TATAMOTORS"] = {"net_qty": 20, "buy_qty": 50, "sell_qty": 30, "buy_val_paise": 4900000, "sell_val_paise": 2982000}
+strat5.fills.extend([
+    {"side": "BUY", "quantity": 50, "price_paise": 98000, "time": "10:05:00"},
+    {"side": "SELL", "quantity": 30, "price_paise": 99400, "time": "11:55:18"},
+])
+strat5.log_signal(Side.BUY, 98000, "VWAP -2 Sigma Oversold Stretch Reentry Triggered")
+strat5.log_signal(Side.SELL, 99400, "Mean Reversion Target Achieved at VWAP Centerline")
 
 manager.register_strategy(strat1)
 manager.register_strategy(strat2)
 manager.register_strategy(strat3)
+manager.register_strategy(strat4)
+manager.register_strategy(strat5)
 
 default_ucc = settings.api_ucc or "HACK342"
-manager.subscribe(default_ucc, strat1.strategy_id)
-manager.subscribe(default_ucc, strat2.strategy_id)
-manager.subscribe(default_ucc, strat3.strategy_id)
+for st in [strat1, strat2, strat3, strat4, strat5]:
+    manager.subscribe(default_ucc, st.strategy_id)
 manager.start_all()
 
 
@@ -1245,18 +1292,29 @@ async def place_order(req: PlaceOrderRequest) -> dict[str, Any]:
 @router.get("/positions")
 async def get_positions() -> list[dict[str, Any]]:
     res = []
+    symbol_prices = {
+        "RELIANCE": {"entry": 2845.0, "current": 2860.0},
+        "INFY": {"entry": 1490.0, "current": 1520.0},
+        "TCS": {"entry": 3420.0, "current": 3410.0},
+        "HDFCBANK": {"entry": 1645.0, "current": 1668.0},
+        "TATAMOTORS": {"entry": 980.0, "current": 994.0},
+        "NIFTY50": {"entry": 22450.0, "current": 22580.0},
+    }
+
     for strat in manager.list_strategies():
         for sym, pos_data in strat.positions.items():
             qty = pos_data.get("net_qty", 0)
             if qty != 0:
+                price_info = symbol_prices.get(sym.upper(), {"entry": 1000.0, "current": 1015.0})
                 res.append({
                     "id": f"pos_{strat.strategy_id}_{sym}",
                     "strategyId": strat.strategy_id,
                     "strategyName": strat.name,
                     "symbol": sym,
                     "quantity": qty,
-                    "entryPrice": 1183.5,
-                    "currentPrice": 1195.0,
+                    "entryPrice": price_info["entry"],
+                    "currentPrice": price_info["current"],
+                    "unrealizedPnl": round(qty * (price_info["current"] - price_info["entry"]), 2),
                 })
     return res
 
