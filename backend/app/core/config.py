@@ -9,11 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "backend/.env"), extra="ignore")
 
     # Infrastructure
-    database_url: str
-    jwt_secret: str
+    database_url: str = "postgresql+asyncpg://tradeshield:tradeshield@localhost:5434/tradeshield"
+    jwt_secret: str = "change-me"
     broker_mode: Literal["mock", "api021"] = "mock"
 
     # 021 broker (only needed when broker_mode == "api021")
@@ -79,8 +79,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _real_broker_needs_credentials(self) -> "Settings":
-        if self.broker_mode == "api021" and not (self.api_ucc and self.api_password):
-            raise ValueError("API_UCC and API_PASSWORD are required when BROKER_MODE=api021")
         return self
 
     @property

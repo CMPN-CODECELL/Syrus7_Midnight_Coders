@@ -8,3 +8,9 @@ pydantic-settings
 pytest
 pytest-asyncio
 httpx
+tzdata
+greenlet
+bcrypt>=4.0.0
+pyjwt>=2.8.0
+aiosqlite
+websockets

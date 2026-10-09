@@ -5,3 +5,7 @@ __pycache__/
 node_modules/
 .pytest_cache/
 pgdata/
+*.db
+dist/
+.output/
+
