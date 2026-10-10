@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     mock_fill_latency_ms: int = 0
     symbols: str = "RELIANCE,TCS,INFY"
 
+    # Razorpay Gateway & Email Notifications
+    razorpay_key_id: str = "rzp_test_SFd7WR1rAUaPUA"
+    razorpay_key_secret: str = "AHqEU8tXJJ1sbjLzZgiGNNsz"
+    mail_username: str = "mqqbrwraxzbzxnqa"
+    mail_password: str = "darshanmali44444@gmail.com"
+    smtp_server: str = "smtp.gmail.com"
+    smtp_port: int = 587
+
     @field_validator("trading_day_tz")
     @classmethod
     def _valid_timezone(cls, v: str) -> str:

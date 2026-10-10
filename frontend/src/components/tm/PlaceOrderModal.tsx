@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, Send } from "lucide-react";
 import { Badge, Button, Field, Modal, inputCls } from "@/components/tm/ui";
-import { usePlaceOrder, useStrategies } from "@/hooks/queries";
+import { useInstruments, usePlaceOrder, useStrategies } from "@/hooks/queries";
 import { inr } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -11,16 +11,26 @@ interface PlaceOrderModalProps {
   defaultSymbol?: string;
 }
 
-const SYMBOLS = [
+const DEFAULT_SYMBOLS = [
   { symbol: "RELIANCE", ltp: 1424.0 },
   { symbol: "TCS", ltp: 3410.0 },
   { symbol: "INFY", ltp: 1520.0 },
   { symbol: "HDFCBANK", ltp: 1645.0 },
+  { symbol: "TATAMOTORS", ltp: 980.0 },
+  { symbol: "NIFTY50", ltp: 22450.0 },
 ];
 
 export function PlaceOrderModal({ open, onClose, defaultSymbol }: PlaceOrderModalProps) {
   const { data: strats = [] } = useStrategies();
+  const { data: instruments = [] } = useInstruments();
   const placeOrder = usePlaceOrder();
+
+  const availableSymbols = instruments.length > 0
+    ? instruments.map((inst) => {
+        const baseMap: Record<string, number> = { RELIANCE: 1424.0, TCS: 3410.0, INFY: 1520.0, HDFCBANK: 1645.0, TATAMOTORS: 980.0, NIFTY50: 22450.0 };
+        return { symbol: inst.symbol, ltp: baseMap[inst.symbol] || 1000.0 };
+      })
+    : DEFAULT_SYMBOLS;
 
   const [symbol, setSymbol] = useState(defaultSymbol || "RELIANCE");
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
@@ -36,7 +46,7 @@ export function PlaceOrderModal({ open, onClose, defaultSymbol }: PlaceOrderModa
     rejection_reason?: string;
   } | null>(null);
 
-  const selectedSymbolObj = SYMBOLS.find((s) => s.symbol === symbol) ?? SYMBOLS[0];
+  const selectedSymbolObj = availableSymbols.find((s) => s.symbol === symbol) ?? availableSymbols[0];
   const refPrice = selectedSymbolObj ? selectedSymbolObj.ltp : 1424.0;
   const numPrice = price ? parseFloat(price) : refPrice;
   const estValue = (numPrice || 0) * (quantity || 0);
@@ -128,7 +138,7 @@ export function PlaceOrderModal({ open, onClose, defaultSymbol }: PlaceOrderModa
         {/* Symbol Selection */}
         <Field label="Symbol">
           <div className="grid grid-cols-4 gap-2">
-            {SYMBOLS.map((s) => (
+            {availableSymbols.slice(0, 4).map((s) => (
               <button
                 key={s.symbol}
                 type="button"

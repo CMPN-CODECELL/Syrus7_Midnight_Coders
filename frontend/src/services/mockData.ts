@@ -211,17 +211,16 @@ export const orders: Order[] = [
 ];
 
 export const positions: Position[] = [
-  { id: "P1", strategyId: "momentum", strategyName: "Momentum Strategy", symbol: "BTCUSDT", quantity: 20, entryPrice: 1420, currentPrice: 1425 },
-  { id: "P2", strategyId: "mean-reversion", strategyName: "Mean Reversion Strategy", symbol: "BTCUSDT", quantity: -10, entryPrice: 1430, currentPrice: 1425 },
-  { id: "P3", strategyId: "breakout", strategyName: "Breakout Strategy", symbol: "BTCUSDT", quantity: 30, entryPrice: 1420, currentPrice: 1425 },
-  { id: "P4", strategyId: "breakout", strategyName: "Breakout Strategy", symbol: "SOLUSDT", quantity: 15, entryPrice: 3412, currentPrice: 3405.5 },
+  { id: "P1", strategyId: "strat_time", strategyName: "TimeBased Strategy", symbol: "RELIANCE", quantity: 5, entryPrice: 1422.5, currentPrice: 1424.0 },
+  { id: "P2", strategyId: "strat_breakout", strategyName: "Breakout Strategy", symbol: "INFY", quantity: 10, entryPrice: 1490.0, currentPrice: 1520.0 },
+  { id: "P3", strategyId: "strat_ma", strategyName: "Moving Average Cross", symbol: "TCS", quantity: -4, entryPrice: 3420.0, currentPrice: 3410.0 },
 ];
 
 export const riskEvents: RiskEvent[] = [
-  { id: "E1", time: "14:42:10", type: "APPROVED", message: "Order approved — ORD-001 BUY 20 BTCUSDT (Momentum)" },
-  { id: "E2", time: "14:38:02", type: "PARTIAL_FILL", message: "Partial fill received — ORD-002 15/30 SOLUSDT (Breakout)" },
-  { id: "E3", time: "14:38:01", type: "APPROVED", message: "Order approved — ORD-002 BUY 30 SOLUSDT (Breakout)" },
-  { id: "E4", time: "14:35:47", type: "REJECTED", message: "Order rejected — ORD-003 SELL 20 ETHUSDT (Mean Reversion)", reason: "MAX_POSITION_SIZE_EXCEEDED" },
-  { id: "E5", time: "14:30:00", type: "APPROVED", message: "Order approved — ORD-004 SELL 10 BTCUSDT (Mean Reversion)" },
-  { id: "E6", time: "09:15:00", type: "INFO", message: "Risk engine started — limits loaded for 2 active strategies" },
+  { id: "E1", time: "14:42:10", type: "APPROVED", message: "Order approved — ORD-001 BUY 5 RELIANCE (TimeBased)" },
+  { id: "E2", time: "14:38:02", type: "PARTIAL_FILL", message: "Partial fill received — ORD-002 4/10 TCS (Breakout)" },
+  { id: "E3", time: "14:38:01", type: "APPROVED", message: "Order approved — ORD-002 BUY 10 TCS (Breakout)" },
+  { id: "E4", time: "14:35:47", type: "REJECTED", message: "Order rejected — ORD-003 BUY 15 HDFCBANK (TimeBased)", reason: "MAX_POSITION_SIZE_EXCEEDED" },
+  { id: "E5", time: "14:30:00", type: "APPROVED", message: "Order approved — ORD-004 SELL 4 INFY (MA Cross)" },
+  { id: "E6", time: "09:15:00", type: "INFO", message: "Risk engine started — limits loaded for active strategies" },
 ];

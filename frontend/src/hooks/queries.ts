@@ -8,6 +8,8 @@ export const useAccount = () => useQuery({ queryKey: ["account"], queryFn: accou
 export const usePnlHistory = () => useQuery({ queryKey: ["pnl"], queryFn: accountService.getPnlHistory, refetchInterval: 5000 });
 export const useCandles = (symbol: string, tf: Timeframe) =>
   useQuery({ queryKey: ["candles", symbol, tf], queryFn: () => marketDataService.getCandles(symbol, tf), refetchInterval: 2500 });
+export const useInstruments = () =>
+  useQuery({ queryKey: ["instruments"], queryFn: marketDataService.getInstruments, refetchInterval: 10000 });
 
 export const useStrategies = () => useQuery({ queryKey: ["strategies"], queryFn: strategyService.getStrategies, refetchInterval: 3000 });
 export const useStrategy = (id: string) => useQuery({ queryKey: ["strategies", id], queryFn: () => strategyService.getStrategy(id), refetchInterval: 3000 });
