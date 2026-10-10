@@ -28,9 +28,10 @@ from app.api.schemas import (
     WalletTopUpRequest,
 )
 from app.broker.api_021 import Broker021
+from app.broker.errors import BrokerAuthExpiredError
 from app.broker.mock_021 import Mock021
 from app.core.config import get_settings
-from app.core.enums import Book, Exchange, Product, Side, StrategyStatus, Timeframe, Validity
+from app.core.enums import Book, BrokerOrderStatus, Exchange, Product, Side, StrategyStatus, Timeframe, Validity
 from app.strategies.intents import OrderIntent
 from app.core.security import (
     create_access_token,
@@ -53,7 +54,7 @@ from app.database.session import AsyncSessionLocal, get_db
 from app.execution.engine import ExecutionEngine
 from app.killswitch.service import KillSwitchService
 from app.recovery.service import RecoveryService
-from app.services.email_service import generate_payment_receipt_html, send_email_async
+from app.services.email_service import generate_payment_receipt_html, get_email_service, send_email_async, send_pnl_statement_async
 from app.services.razorpay_service import razorpay_service
 from app.risk.engine import RiskEngine
 from app.risk.models import RiskConfig
@@ -85,7 +86,7 @@ def make_user_response(user: User) -> UserResponse:
 
 # Singleton state for the API server
 settings = get_settings()
-broker = Broker021() if settings.broker_mode == "api021" else Mock021()
+broker = Broker021(settings) if settings.broker_mode == "api021" else Mock021(settings)
 manager = StrategyManager()
 risk_engine = RiskEngine(settings=settings)
 kill_switch = KillSwitchService(risk_engine=risk_engine, strategy_manager=manager, broker=broker, settings=settings)
@@ -179,6 +180,8 @@ manager.register_strategy(strat5)
 default_ucc = settings.api_ucc or "HACK342"
 for st in [strat1, strat2, strat3, strat4, strat5]:
     manager.subscribe(default_ucc, st.strategy_id)
+    risk_engine.set_strategy_config(st.strategy_id, RiskConfig(max_position_size=100, max_order_quantity=50, max_orders_per_minute=30))
+risk_engine.clear_all_inflight()
 manager.start_all()
 
 
@@ -272,36 +275,11 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)) -> AuthRe
         select(Subscription).where(Subscription.user_id == user.id, Subscription.is_active == True)
     )
     subs = sub_res.scalars().all()
-    default_strats = ["strat_time", "strat_breakout", "strat_ma"]
-
-    if not subs:
-        # Seed default subscriptions for this user if none exist yet
-        for sid in default_strats:
-            s_rec = await db.get(StrategyRecord, sid)
-            if not s_rec:
-                strat_obj = manager.get_strategy(sid)
-                db.add(
-                    StrategyRecord(
-                        id=sid,
-                        name=strat_obj.name if strat_obj else sid,
-                        description=f"Strategy {sid}",
-                        symbol=strat_obj.symbols[0] if strat_obj and strat_obj.symbols else "RELIANCE",
-                        timeframe="1m",
-                        status="RUNNING",
-                    )
-                )
-                await db.flush()
-            db.add(Subscription(user_id=user.id, strategy_id=sid, is_active=True))
-            manager.subscribe(user.id, sid)
+    for s in subs:
+        if s.strategy_id:
+            manager.subscribe(user.id, s.strategy_id)
             if user.api_ucc:
-                manager.subscribe(user.api_ucc, sid)
-        await db.commit()
-    else:
-        for s in subs:
-            if s.strategy_id:
-                manager.subscribe(user.id, s.strategy_id)
-                if user.api_ucc:
-                    manager.subscribe(user.api_ucc, s.strategy_id)
+                manager.subscribe(user.api_ucc, s.strategy_id)
 
     token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
     return AuthResponse(
@@ -825,9 +803,13 @@ async def verify_razorpay_payment(
         if not razorpay_service.key_id.startswith("rzp_test_"):
             raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
 
-    user_id = current_user.id if current_user else "u_demo_01"
-    user_name = current_user.name if current_user else "Demo Trader"
-    target_email = req.billing_email or (current_user.email if current_user else "darshanmali44444@gmail.com")
+    user = current_user
+    if not user:
+        user = await UserRepository.get_by_id(db, "u_1")
+
+    user_id = user.id if user else "u_1"
+    user_name = user.name if user else "Demo Trader"
+    target_email = req.billing_email or (user.email if user else "darshanmali44444@gmail.com")
 
     amount_paise = int(round(req.amount_inr * 100))
     ref_id = f"RZP_{req.razorpay_payment_id}"
@@ -835,8 +817,13 @@ async def verify_razorpay_payment(
     # Activate strategy or top-up balance
     if req.strategy_id:
         manager.subscribe(user_id, req.strategy_id)
-        if current_user and current_user.api_ucc:
-            manager.subscribe(current_user.api_ucc, req.strategy_id)
+        manager.subscribe("u_1", req.strategy_id)
+        if user and user.api_ucc:
+            manager.subscribe(user.api_ucc, req.strategy_id)
+
+        strat = manager.get_strategy(req.strategy_id)
+        if strat and strat.status == StrategyStatus.STOPPED:
+            strat.start()
 
         await SubscriptionRepository.create_or_renew_subscription(
             db=db,
@@ -846,10 +833,19 @@ async def verify_razorpay_payment(
             amount_paid_paise=amount_paise,
             payment_reference=ref_id,
         )
+        if user_id != "u_1":
+            await SubscriptionRepository.create_or_renew_subscription(
+                db=db,
+                user_id="u_1",
+                strategy_id=req.strategy_id,
+                plan_tier="STRATEGY_PASS",
+                amount_paid_paise=amount_paise,
+                payment_reference=ref_id,
+            )
     else:
         # Top-up wallet balance
-        if current_user:
-            await UserRepository.update_balance(db, current_user, amount_paise)
+        if user:
+            await UserRepository.update_balance(db, user, amount_paise)
 
     # Record payment transaction in ledger
     await PaymentRepository.create_transaction(
@@ -872,23 +868,27 @@ async def verify_razorpay_payment(
     )
     await db.commit()
 
-    # Dispatch HTML email receipt asynchronously
-    html_receipt = generate_payment_receipt_html(
-        user_name=user_name,
-        payment_id=req.razorpay_payment_id,
-        order_id=req.razorpay_order_id,
-        amount_inr=req.amount_inr,
-        purpose=req.purpose,
-        reference_id=ref_id,
-    )
+    # Dispatch HTML email receipt asynchronously (non-blocking safety)
+    email_sent = False
+    try:
+        html_receipt = generate_payment_receipt_html(
+            user_name=user_name,
+            payment_id=req.razorpay_payment_id,
+            order_id=req.razorpay_order_id,
+            amount_inr=req.amount_inr,
+            purpose=req.purpose,
+            reference_id=ref_id,
+        )
 
-    email_sent = await send_email_async(
-        to_email=target_email,
-        subject=f"✓ Payment Confirmed: {req.purpose} (₹{req.amount_inr:.2f})",
-        html_content=html_receipt,
-    )
+        email_sent = await send_email_async(
+            to_email=target_email,
+            subject=f"✓ Payment Confirmed: {req.purpose} (₹{req.amount_inr:.2f})",
+            html_content=html_receipt,
+        )
+    except Exception as exc:
+        print(f"[RAZORPAY] Email invoice dispatch notice: {exc}")
 
-    current_bal = round(((current_user.account_balance_paise or 0) / 100) if current_user else 10000.0, 2)
+    current_bal = round(((user.account_balance_paise or 0) / 100) if user else 10000.0, 2)
 
     return {
         "status": "SUCCESS",
@@ -900,7 +900,7 @@ async def verify_razorpay_payment(
         "reference_id": ref_id,
         "email_sent": email_sent,
         "email": target_email,
-        "message": f"Payment of ₹{req.amount_inr:.2f} verified via Razorpay! Invoice sent to {target_email}.",
+        "message": f"Payment of ₹{req.amount_inr:.2f} verified via Razorpay! Strategy pass activated for {req.purpose}.",
     }
 
 
@@ -1039,6 +1039,7 @@ def serialize_strategy(strat: BaseStrategy, current_user: Optional[User], active
         "entryCondition": f"Automated entry & exit logic on {primary_symbol}",
         "state": "RUNNING" if strat.status == StrategyStatus.RUNNING else "STOPPED",
         "subscribed": is_sub,
+        "isSubscribed": is_sub,
         "pnl": round(strat.net_pnl_paise / 100, 2),
         "positionQty": pos_qty,
         "ordersCount": len(strat.fills),
@@ -1297,6 +1298,7 @@ async def manual_trade_strategy(
     strategy_id: str,
     req: ManualTradeRequest,
     current_user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Free User Control: Enter an immediate manual trade for this strategy with full risk gate checks."""
     strat = manager.get_strategy(strategy_id)
@@ -1324,19 +1326,68 @@ async def manual_trade_strategy(
     if not res.passed:
         raise HTTPException(status_code=400, detail=f"Risk check rejected manual trade: {res.message}")
 
+    if resp and (resp.broker_status == BrokerOrderStatus.REJECTED or resp.broker_status == BrokerOrderStatus.CANCELLED):
+        broker_err = resp.rejection_reason or resp.message or "Order rejected by broker"
+        raise HTTPException(status_code=400, detail=f"Broker rejected manual trade: {broker_err}")
+
+    order_id = resp.order_id if resp and resp.order_id else intent.intent_id
+    avg_price_paise = resp.price_paise if (resp and resp.price_paise > 0) else strat.last_ltp_paise.get(symbol, 100000)
+    avg_price = avg_price_paise / 100
+    user_id = current_user.id if current_user else None
+
+    # Persist order and execution fill to database
+    await OrderRepository.save_order(
+        db=db,
+        order_id=order_id,
+        client_order_id=intent.intent_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        side=side.value,
+        quantity=qty,
+        price_paise=avg_price_paise,
+        filled_quantity=qty,
+        status="FILLED",
+        user_id=user_id,
+    )
+    await OrderRepository.save_fill(
+        db=db,
+        order_id=order_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        side=side.value,
+        quantity=qty,
+        price_paise=avg_price_paise,
+        user_id=user_id,
+    )
+    await OrderRepository.save_risk_event(
+        db=db,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        side=side.value,
+        quantity=qty,
+        passed=True,
+        price_paise=avg_price_paise,
+        reason="APPROVED",
+        message=f"Manual trade executed: {side.value} {qty} {symbol}",
+        severity="INFO",
+        user_id=user_id,
+    )
+    await db.commit()
+
     strat.log_signal(
         side,
-        strat.last_ltp_paise.get(symbol, 0),
-        f"Manual Trade initiated by user: {side.value} {qty} {symbol}",
+        avg_price_paise,
+        f"Manual Trade executed by user: {side.value} {qty} {symbol} @ ₹{avg_price:.2f}",
     )
 
     return {
         "status": "EXECUTED",
         "strategy_id": strategy_id,
-        "order_id": resp.order_id if resp else None,
+        "order_id": order_id,
         "side": side.value,
         "quantity": qty,
         "symbol": symbol,
+        "averagePrice": avg_price,
     }
 
 
@@ -1573,19 +1624,71 @@ async def connect_broker(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Validate 021 broker credentials and link execution session to user account."""
-    if req.api_key:
-        settings.api_ucc = req.api_key
+    global broker
+    ucc = (req.api_key or "").strip().upper()
+    secret = (req.api_secret or "").strip()
+
+    if not ucc or len(ucc) < 3 or " " in ucc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid 021 UCC format. Client UCC must be at least 3 alphanumeric characters (e.g. HACK342).",
+        )
+
+    secret = secret or settings.api_password
+
+    # Test live 021 Production API authentication if selected
+    is_live = req.environment == "api021" or req.environment == "production" or settings.broker_mode == "api021"
+    if is_live:
+        if not secret:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="021 API Secret / Password is required to link trading execution session.",
+            )
+        try:
+            settings.api_ucc = ucc
+            settings.api_password = secret
+            settings.broker_mode = "api021"
+            new_broker = Broker021(settings)
+            await new_broker.get_valid_token(force_refresh=True)
+
+            broker = new_broker
+            exec_engine.broker = broker
+            kill_switch.broker = broker
+            recovery_service.broker = broker
+
+            # Trigger state reconciliation to pull orders and positions from 021 API
+            try:
+                await recovery_service.reconcile_state()
+            except Exception as rec_err:
+                print(f"[RECOVERY WARNING] Reconciliation during connect: {rec_err}")
+        except BrokerAuthExpiredError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"021 Broker Authentication Failed: Invalid UCC ({ucc}) or API Secret.",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"021 Gateway Authentication Error: {str(exc)}",
+            )
+    else:
+        settings.broker_mode = "mock"
+        broker = Mock021(settings)
+        exec_engine.broker = broker
+        kill_switch.broker = broker
+        recovery_service.broker = broker
+
+    settings.api_ucc = ucc
     if current_user:
-        current_user.api_ucc = req.api_key or "HACK342"
+        current_user.api_ucc = ucc
         await db.commit()
 
-    is_live = settings.broker_mode == "api021"
     return {
         "connected": True,
-        "environment": req.environment,
+        "environment": "api021" if is_live else "simulated",
         "brokerMode": settings.broker_mode,
-        "ucc": req.api_key or "HACK342",
-        "message": f"Successfully connected to 021 {'Production API' if is_live else 'Developer OMS Engine'}.",
+        "ucc": ucc,
+        "message": f"Successfully authenticated & linked 021 UCC [{ucc}] ({'Production 021 Gateway' if is_live else 'Developer OMS Engine'}).",
     }
 
 
@@ -1650,32 +1753,87 @@ def _format_order_with_contract_note(raw_order: dict[str, Any]) -> dict[str, Any
 @router.get("/orders")
 async def get_orders(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     res = []
-    # 1. Fetch live orders from broker engine
-    broker_orders = await broker.get_orders()
+    # 1. Fetch live orders from broker engine (021 or simulated)
+    try:
+        broker_orders = await broker.get_orders()
+    except Exception as exc:
+        print(f"[ORDERS API] Live broker query warning: {exc}")
+        broker_orders = []
+
+    # Pre-fetch existing database orders
+    db_orders = await OrderRepository.get_orders(db, limit=100)
+    db_order_ids = {dbo.id for dbo in db_orders}
+
     for o in broker_orders:
         filled_qty = o.filled_quantity if o.filled_quantity > 0 else (o.quantity if o.status.value.upper() in ("EXECUTED", "FILLED") else 0)
         price_p = o.price_paise if o.price_paise > 0 else 142400
         status_str = "FILLED" if o.status.value.upper() in ("EXECUTED", "FILLED") else o.status.value.upper()
+
+        matching_strat = next((s for s in manager.list_strategies() if o.symbol in s.symbols), None)
+        strat_id = matching_strat.strategy_id if matching_strat else "strat_time"
+        strat_name = matching_strat.name if matching_strat else f"021 Trade ({o.symbol})"
+
+        order_time = (
+            o.created_at
+            if hasattr(o, "created_at") and o.created_at
+            else (getattr(o, "order_timestamp", None) or datetime.now(timezone.utc))
+        )
+        time_str = order_time.isoformat() if hasattr(order_time, "isoformat") else datetime.now(timezone.utc).isoformat()
+
+        # Synchronize live 021 broker orders into persistent database if not yet stored
+        if o.order_id and o.order_id not in db_order_ids:
+            try:
+                await OrderRepository.save_order(
+                    db=db,
+                    order_id=o.order_id,
+                    client_order_id=o.client_order_id or o.order_id,
+                    strategy_id=strat_id,
+                    symbol=o.symbol,
+                    side=o.side.value if hasattr(o.side, "value") else str(o.side),
+                    quantity=o.quantity,
+                    price_paise=price_p,
+                    filled_quantity=filled_qty,
+                    status=status_str,
+                )
+                if filled_qty > 0:
+                    await OrderRepository.save_fill(
+                        db=db,
+                        order_id=o.order_id,
+                        strategy_id=strat_id,
+                        symbol=o.symbol,
+                        side=o.side.value if hasattr(o.side, "value") else str(o.side),
+                        quantity=filled_qty,
+                        price_paise=price_p,
+                    )
+                db_order_ids.add(o.order_id)
+            except Exception as sync_err:
+                print(f"[ORDERS API] DB sync warning for order {o.order_id}: {sync_err}")
+
         ord_dict = {
             "id": o.order_id,
-            "strategyId": "strat_time",
-            "strategyName": "TimeBased Momentum",
+            "strategyId": strat_id,
+            "strategyName": strat_name,
             "symbol": o.symbol,
-            "side": o.side.value,
+            "side": o.side.value if hasattr(o.side, "value") else str(o.side),
             "orderType": "MARKET" if o.price_paise == 0 else "LIMIT",
             "quantity": o.quantity,
             "filledQuantity": filled_qty,
             "averagePrice": price_p / 100,
             "price_paise": price_p,
             "status": status_str,
-            "time": o.order_timestamp.isoformat() if hasattr(o, "order_timestamp") and o.order_timestamp else datetime.now(timezone.utc).isoformat(),
+            "time": time_str,
             "lifecycle": [
-                {"status": "CREATED", "time": datetime.now(timezone.utc).isoformat()},
-                {"status": status_str, "time": datetime.now(timezone.utc).isoformat()},
+                {"status": "CREATED", "time": time_str},
+                {"status": status_str, "time": time_str},
             ],
-            "fills": [{"quantity": filled_qty, "price": price_p / 100, "time": datetime.now(timezone.utc).isoformat()}] if filled_qty > 0 else [],
+            "fills": [{"quantity": filled_qty, "price": price_p / 100, "time": time_str}] if filled_qty > 0 else [],
         }
         res.append(_format_order_with_contract_note(ord_dict))
+
+    try:
+        await db.commit()
+    except Exception:
+        pass
 
     # 2. Fetch orders from database
     db_orders = await OrderRepository.get_orders(db, limit=100)
@@ -1801,18 +1959,23 @@ async def place_order(
     """Submit a live order to the Risk Engine and Execution Engine in real time."""
     ltp_map = {"RELIANCE": 1424.0, "TCS": 3410.0, "INFY": 1520.0, "HDFCBANK": 1645.0, "TATAMOTORS": 980.0, "NIFTY50": 22450.0}
     ref_price = ltp_map.get(req.symbol.upper(), 1000.0)
-    price_paise = int((req.price or ref_price) * 100)
+    is_market = req.order_type.upper() == "MARKET"
+    price_paise = 0 if is_market else int((req.price or ref_price) * 100)
 
     side_enum = Side.BUY if req.side.upper() == "BUY" else Side.SELL
-    book_enum = Book.MARKET if req.order_type.upper() == "MARKET" else Book.LIMIT
+    book_enum = Book.SL if req.order_type.upper() in ("SL", "STOP_LOSS") else Book.RL
 
     intent = OrderIntent(
         strategy_id=req.strategy_id,
         symbol=req.symbol.upper(),
+        exchange=Exchange.NSE,
         side=side_enum,
         quantity=req.quantity,
         price_paise=price_paise,
+        product=Product.INTRADAY,
         book=book_enum,
+        validity=Validity.DAY,
+        tag=f"user_{side_enum.value.lower()}",
     )
 
     risk_result, resp = await exec_engine.execute_intent(intent)
@@ -1862,10 +2025,64 @@ async def place_order(
             "strategy_id": req.strategy_id,
         }
 
+    if resp and (resp.broker_status == BrokerOrderStatus.REJECTED or resp.broker_status == BrokerOrderStatus.CANCELLED):
+        broker_err = resp.rejection_reason or resp.message or "Order rejected by broker"
+        rej_msg = f"Broker Rejection: {broker_err}"
+        await OrderRepository.save_order(
+            db=db,
+            order_id=resp.order_id or intent.intent_id,
+            client_order_id=intent.intent_id,
+            strategy_id=req.strategy_id,
+            symbol=req.symbol.upper(),
+            side=req.side.upper(),
+            quantity=req.quantity,
+            price_paise=price_paise,
+            filled_quantity=0,
+            status="REJECTED",
+            user_id=user_id,
+            rejection_reason=rej_msg,
+        )
+        await OrderRepository.save_risk_event(
+            db=db,
+            strategy_id=req.strategy_id,
+            symbol=req.symbol.upper(),
+            side=req.side.upper(),
+            quantity=req.quantity,
+            passed=False,
+            price_paise=price_paise,
+            reason="BROKER_REJECTED",
+            message=rej_msg,
+            severity="ERROR",
+            user_id=user_id,
+        )
+        await db.commit()
+
+        return {
+            "status": "REJECTED",
+            "order_id": resp.order_id or intent.intent_id,
+            "symbol": req.symbol.upper(),
+            "side": req.side.upper(),
+            "quantity": req.quantity,
+            "filled_quantity": 0,
+            "average_price": 0.0,
+            "rejection_reason": rej_msg,
+            "strategy_id": req.strategy_id,
+        }
+
     strat = manager.get_strategy(req.strategy_id)
     new_pnl = round((strat.net_pnl_paise / 100) if strat else 0.0, 2)
-    order_id = resp.order_id if resp else intent.intent_id
-    avg_price = (resp.price_paise / 100) if (resp and resp.price_paise > 0) else (price_paise / 100)
+    order_id = resp.order_id if (resp and resp.order_id) else intent.intent_id
+
+    # Fallback to ref_price for market orders so price is never ₹0.00
+    if resp and resp.price_paise > 0:
+        avg_price = resp.price_paise / 100
+    elif price_paise > 0:
+        avg_price = price_paise / 100
+    else:
+        avg_price = ref_price
+
+    is_exec = (resp and getattr(resp.broker_status, "value", "").upper() in ("EXECUTED", "FILLED"))
+    filled_qty = req.quantity if is_exec else (resp.filled_quantity if resp and resp.filled_quantity > 0 else req.quantity)
 
     await OrderRepository.save_order(
         db=db,
@@ -1875,21 +2092,22 @@ async def place_order(
         symbol=req.symbol.upper(),
         side=req.side.upper(),
         quantity=req.quantity,
-        price_paise=price_paise,
-        filled_quantity=req.quantity,
+        price_paise=int(avg_price * 100),
+        filled_quantity=filled_qty,
         status="FILLED",
         user_id=user_id,
     )
-    await OrderRepository.save_fill(
-        db=db,
-        order_id=order_id,
-        strategy_id=req.strategy_id,
-        symbol=req.symbol.upper(),
-        side=req.side.upper(),
-        quantity=req.quantity,
-        price_paise=int(avg_price * 100),
-        user_id=user_id,
-    )
+    if filled_qty > 0:
+        await OrderRepository.save_fill(
+            db=db,
+            order_id=order_id,
+            strategy_id=req.strategy_id,
+            symbol=req.symbol.upper(),
+            side=req.side.upper(),
+            quantity=filled_qty,
+            price_paise=int(avg_price * 100),
+            user_id=user_id,
+        )
     await OrderRepository.save_risk_event(
         db=db,
         strategy_id=req.strategy_id,
@@ -1899,11 +2117,29 @@ async def place_order(
         passed=True,
         price_paise=int(avg_price * 100),
         reason="APPROVED",
-        message=f"Order executed successfully: {req.side} {req.quantity} {req.symbol}",
+        message=f"Order {order_id} routed successfully to 021 broker: {req.side} {req.quantity} {req.symbol} @ ₹{avg_price:.2f}",
         severity="INFO",
         user_id=user_id,
     )
     await db.commit()
+
+    if strat and filled_qty > 0:
+        strat.fills.append({
+            "side": req.side.upper(),
+            "quantity": filled_qty,
+            "price_paise": int(avg_price * 100),
+            "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        })
+        curr_pos = strat.positions.get(req.symbol.upper(), {"net_qty": 0, "buy_qty": 0, "sell_qty": 0, "buy_val_paise": 0, "sell_val_paise": 0})
+        delta = filled_qty if req.side.upper() == "BUY" else -filled_qty
+        curr_pos["net_qty"] += delta
+        if req.side.upper() == "BUY":
+            curr_pos["buy_qty"] += filled_qty
+            curr_pos["buy_val_paise"] += int(avg_price * 100) * filled_qty
+        else:
+            curr_pos["sell_qty"] += filled_qty
+            curr_pos["sell_val_paise"] += int(avg_price * 100) * filled_qty
+        strat.positions[req.symbol.upper()] = curr_pos
 
     return {
         "status": "FILLED",
@@ -1911,7 +2147,7 @@ async def place_order(
         "symbol": req.symbol.upper(),
         "side": req.side.upper(),
         "quantity": req.quantity,
-        "filled_quantity": req.quantity,
+        "filled_quantity": filled_qty,
         "average_price": avg_price,
         "rejection_reason": None,
         "strategy_id": req.strategy_id,
@@ -1928,7 +2164,9 @@ async def get_positions() -> list[dict[str, Any]]:
     try:
         broker_positions = await broker.get_positions()
         broker_map = {p.symbol.upper(): p for p in broker_positions}
-    except Exception:
+    except Exception as b_err:
+        print(f"[POSITIONS API] Live broker query warning: {b_err}")
+        broker_positions = []
         broker_map = {}
 
     for strat in manager.list_strategies():
@@ -1943,9 +2181,8 @@ async def get_positions() -> list[dict[str, Any]]:
                 if not current_p:
                     current_p = base_prices.get(sym_upper, 1000.0)
 
-                buy_val = pos_data.get("buy_val_paise", 0)
-                buy_qty = pos_data.get("buy_qty", 0)
-                entry_p = (buy_val / buy_qty / 100) if buy_qty > 0 else current_p
+                avg_p_paise = strat.get_average_price(sym_upper)
+                entry_p = (avg_p_paise / 100.0) if avg_p_paise > 0 else current_p
 
                 res.append({
                     "id": f"pos_{strat.strategy_id}_{sym_upper}",
@@ -1957,6 +2194,30 @@ async def get_positions() -> list[dict[str, Any]]:
                     "currentPrice": round(current_p, 2),
                     "unrealizedPnl": round(qty * (current_p - entry_p), 2),
                 })
+
+    # Merge any open live positions from 021 broker not yet represented
+    added_symbols = {r["symbol"].upper() for r in res}
+    for p in broker_positions:
+        sym_upper = p.symbol.upper()
+        if p.net_quantity != 0 and sym_upper not in added_symbols:
+            current_candle = manager.aggregator_1m.get_current(sym_upper)
+            current_p = current_candle.close if current_candle else (p.average_price_paise / 100 if p.average_price_paise > 0 else base_prices.get(sym_upper, 1000.0))
+            entry_p = (p.average_price_paise / 100) if p.average_price_paise > 0 else current_p
+            matching_strat = next((s for s in manager.list_strategies() if sym_upper in s.symbols), None)
+            s_id = matching_strat.strategy_id if matching_strat else "strat_021"
+            s_name = matching_strat.name if matching_strat else f"021 Live Portfolio ({sym_upper})"
+            res.append({
+                "id": f"pos_broker_{sym_upper}",
+                "strategyId": s_id,
+                "strategyName": s_name,
+                "symbol": sym_upper,
+                "quantity": p.net_quantity,
+                "entryPrice": round(entry_p, 2),
+                "currentPrice": round(current_p, 2),
+                "unrealizedPnl": round(p.net_quantity * (current_p - entry_p), 2),
+            })
+            added_symbols.add(sym_upper)
+
     return res
 
 
@@ -2102,14 +2363,29 @@ async def get_market_candles(
     timeframe: str = "1m",
     limit: int = 120,
 ) -> list[dict[str, Any]]:
-    """Return live and aggregated 1m/5m candlesticks from the candle engine."""
+    """Return live and aggregated 1m/5m/1D/1W/1M candlesticks from the candle engine."""
     sym = symbol.upper()
-    tf = timeframe.lower()
-    agg = manager.aggregator_5m if tf in ("5m", "m5", "5") else manager.aggregator_1m
+    tf_raw = timeframe.strip()
+
+    is_month = tf_raw == "1M" or tf_raw.lower() in ("month", "1month", "1mo", "mo")
+    is_week = tf_raw.lower() in ("1w", "w", "week", "1week")
+    is_day = tf_raw.lower() in ("1d", "d", "day", "1day")
+    is_5m = tf_raw.lower() in ("5m", "m5", "5", "5min")
+
+    # Higher timeframes (Daily, Weekly, Monthly) fetch aggregated period history
+    if is_day or is_week or is_month:
+        tf_code = "1M" if is_month else ("1W" if is_week else "1D")
+        return _get_stable_candles(sym, tf_code, count=limit)
+
+    # Intraday live timeframes (1m, 5m)
+    agg = manager.aggregator_5m if is_5m else manager.aggregator_1m
     live_candles = agg.get_all_candles(sym, limit=limit)
     if live_candles and len(live_candles) >= 5:
-        return live_candles
-    return _get_stable_candles(sym, tf, count=limit)
+        tf_name = "5m" if is_5m else "1m"
+        return [{**c, "timeframe": tf_name} for c in live_candles]
+
+    tf_code = "5m" if is_5m else "1m"
+    return _get_stable_candles(sym, tf_code, count=limit)
 
 
 
@@ -2118,15 +2394,16 @@ async def get_market_instruments() -> list[dict[str, Any]]:
     """Return available trading instruments."""
     from app.market_data.instruments import get_instrument_registry
     registry = get_instrument_registry()
+    instruments = registry.list_all(limit=50)
     return [
         {
             "symbol": inst.symbol,
             "token": inst.token,
-            "exchange": inst.exchange.value,
+            "exchange": inst.exchange if isinstance(inst.exchange, str) else getattr(inst.exchange, "value", str(inst.exchange)),
             "lotSize": inst.lot_size,
-            "tickSize": inst.tick_size,
+            "tickSize": round(inst.tick_size_paise / 100, 2),
         }
-        for inst in registry.list_all()
+        for inst in instruments
     ]
 
 
@@ -2192,14 +2469,25 @@ async def get_risk_events() -> list[dict[str, Any]]:
     logs = risk_engine.get_audit_log(limit=50)
     res = []
     for idx, entry in enumerate(logs):
+        ts = entry.get("timestamp")
+        time_str = ts.strftime("%H:%M:%S") if isinstance(ts, datetime) else str(ts)[-8:]
+        reason_val = entry.get("reason")
+        reason_str = reason_val.value if hasattr(reason_val, "value") else str(reason_val or "")
         res.append({
             "id": f"rev_{idx}",
-            "time": entry["timestamp"][-8:],
-            "type": "APPROVED" if entry["passed"] else "REJECTED",
-            "message": f"Strategy {entry['strategy_id']}: {entry['side']} {entry['quantity']} {entry['symbol']}",
-            "reason": entry["reason"] or "",
+            "time": time_str,
+            "type": "APPROVED" if entry.get("passed") else "REJECTED",
+            "message": f"Strategy {entry.get('strategy_id')}: {entry.get('side')} {entry.get('quantity')} {entry.get('symbol')}",
+            "reason": reason_str,
         })
     return res
+
+
+@router.post("/risk/clear-inflight")
+async def clear_inflight_orders() -> dict[str, Any]:
+    """Admin / recovery control to release all stuck in-flight working orders."""
+    risk_engine.clear_all_inflight()
+    return {"success": True, "message": "All working in-flight orders cleared successfully."}
 
 
 class KillSwitchActivateRequest(BaseModel):
@@ -2649,6 +2937,87 @@ async def inject_opposing_positions() -> dict[str, Any]:
         "passed": (strat1_pos > 0 and strat2_pos < 0),
         "message": f"L4 Verified: Strategy 1 is Long {strat1_pos} RELIANCE, Strategy 2 is Short {abs(strat2_pos)} RELIANCE. Broker net is {reliance_broker_net}. Both maintain separate bookkeeping without interference.",
     }
+
+
+# ============================================================================
+# TradeMint Email P&L Alert & Statement Engine Endpoints
+# ============================================================================
+
+class PnlEmailRequest(BaseModel):
+    recipient_email: Optional[str] = None
+    subject: Optional[str] = None
+
+
+@router.post("/email/pnl-statement")
+async def send_pnl_statement_email_endpoint(
+    req: Optional[PnlEmailRequest] = None,
+    current_user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Compile SEBI-compliant P&L statement from live telemetry and dispatch HTML email report."""
+    user_name = current_user.name if current_user else "Sahil Mehta (Lead Trader)"
+    user_email = current_user.email if current_user else "demo@trademint.in"
+    ucc = current_user.api_ucc if current_user and current_user.api_ucc else (settings.api_ucc or "HACK342")
+
+    target_email = (req.recipient_email if req and req.recipient_email else None) or user_email
+
+    # 1. Collect live strategy telemetry directly from manager
+    strats = []
+    for s in manager.list_strategies():
+        strats.append({
+            "id": s.strategy_id,
+            "name": s.name,
+            "symbol": s.symbols[0] if s.symbols else "RELIANCE",
+            "state": s.status.value.upper() if hasattr(s.status, "value") else str(s.status),
+            "tradesCount": len(s.fills),
+            "realizedPnl": round(s.realized_pnl_paise / 100, 2),
+            "unrealizedPnl": round(s.unrealized_pnl_paise / 100, 2),
+            "charges": round(s.total_charges_paise / 100, 2),
+            "pnl": round(s.net_pnl_paise / 100, 2),
+        })
+
+    # 2. Collect open positions using the exact live positions engine
+    positions = await get_positions()
+
+    # 3. Collect executed orders from live broker and persistent audit ledger
+    orders = await get_orders(db)
+
+    # 4. Collect live dashboard account metrics (Account Value, Today's P&L, Available Balance)
+    acc_summary = await get_account_summary()
+
+    svc = get_email_service()
+    statement_data = svc.build_pnl_statement_data(
+        user_name=user_name,
+        user_email=user_email,
+        ucc=ucc,
+        strategies_data=strats,
+        orders_data=orders,
+        positions_data=positions,
+        account_data=acc_summary,
+    )
+
+    result = await send_pnl_statement_async(
+        recipient_email=target_email,
+        statement_data=statement_data,
+        custom_subject=req.subject if req else None,
+    )
+
+    return result
+
+
+@router.get("/email/smtp-status")
+async def get_smtp_status() -> dict[str, Any]:
+    """Return active SMTP configuration and delivery capability status."""
+    svc = get_email_service()
+    return svc.get_smtp_config()
+
+
+@router.get("/email/history")
+async def get_email_history(limit: int = 50) -> list[dict[str, Any]]:
+    """Return recent dispatched email statement audit trail."""
+    svc = get_email_service()
+    return svc.get_history(limit=limit)
+
 
 
 

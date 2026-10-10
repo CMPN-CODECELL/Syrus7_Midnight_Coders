@@ -1,9 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Activity } from "lucide-react";
+import { Activity, CheckCircle2, Mail, Send } from "lucide-react";
 import { Badge, Button, Card, CardHeader, Field, Modal, PageHeader, inputCls } from "@/components/tm/ui";
 import { UserActivityLogModal } from "@/components/tm/UserActivityLogModal";
-import { authService } from "@/services";
+import { authService, emailReportService } from "@/services";
 
 export const Route = createFileRoute("/_app/settings")({
   head: () => ({
@@ -42,7 +42,14 @@ function SettingsPage() {
   const [pwSuccess, setPwSuccess] = useState("");
   const [pwLoading, setPwLoading] = useState(false);
 
+  // Email P&L Statement State
+  const [statementEmail, setStatementEmail] = useState("");
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailResult, setEmailResult] = useState<{ status: string; message: string; statementId?: string } | null>(null);
+  const [smtpStatus, setSmtpStatus] = useState<{ smtpHost: string; smtpUser: string; isConfigured: boolean } | null>(null);
+
   useEffect(() => {
+    emailReportService.getSmtpStatus().then(setSmtpStatus).catch(() => {});
     const loadProfile = async () => {
       const u = (await authService.getMe()) ?? authService.getCurrentUser();
       if (u) {
@@ -250,6 +257,82 @@ function SettingsPage() {
               className="h-4 w-4 accent-primary cursor-pointer"
             />
           </label>
+        </div>
+      </Card>
+
+      {/* TradeMint Automated Email Statements */}
+      <Card>
+        <CardHeader
+          title="Daily P&L Statement & Tax Invoicing"
+          action={
+            <Badge tone={smtpStatus?.isConfigured ? "success" : "neutral"} dot>
+              {smtpStatus?.isConfigured ? `SMTP Active (${smtpStatus.smtpHost})` : "SMTP Standby"}
+            </Badge>
+          }
+        />
+        <div className="space-y-4 p-5">
+          <p className="text-xs text-muted-foreground">
+            Generate an official SEBI SCRA Rule 15 compliant Profit &amp; Loss statement including itemized statutory charges (Brokerage, STT, Stamp Duty, GST, Exchange Fees) and strategy performance, delivered straight to your email.
+          </p>
+
+          {emailResult && (
+            <div
+              className={`rounded-lg border p-3 text-xs ${
+                emailResult.status === "SUCCESS"
+                  ? "border-success/30 bg-success-soft text-success"
+                  : "border-destructive/30 bg-danger-soft text-destructive"
+              }`}
+            >
+              <div className="flex items-center gap-2 font-medium">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <span>{emailResult.message}</span>
+              </div>
+              {emailResult.statementId && (
+                <p className="mt-1 font-mono text-[11px] opacity-80">
+                  Statement ID: {emailResult.statementId}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+            <div className="flex-1">
+              <input
+                className={inputCls}
+                type="email"
+                placeholder={email || "recipient@example.com"}
+                value={statementEmail}
+                onChange={(e) => setStatementEmail(e.target.value)}
+              />
+            </div>
+            <Button
+              disabled={emailSending}
+              onClick={async () => {
+                setEmailSending(true);
+                setEmailResult(null);
+                try {
+                  const target = statementEmail.trim() || email;
+                  const res = await emailReportService.sendPnlStatement(target);
+                  setEmailResult({
+                    status: res.status,
+                    message: res.message || "Statement successfully dispatched!",
+                    statementId: res.statementId,
+                  });
+                } catch (err: unknown) {
+                  setEmailResult({
+                    status: "ERROR",
+                    message: err instanceof Error ? err.message : "Failed to send email statement.",
+                  });
+                } finally {
+                  setEmailSending(false);
+                }
+              }}
+              className="inline-flex items-center justify-center gap-1.5"
+            >
+              <Send className="h-4 w-4" />
+              {emailSending ? "Dispatching Statement…" : "Send Statement to Email"}
+            </Button>
+          </div>
         </div>
       </Card>
 

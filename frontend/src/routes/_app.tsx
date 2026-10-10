@@ -1,11 +1,12 @@
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import {
-  LayoutDashboard, CandlestickChart, Workflow, ListOrdered, Layers, ShieldCheck, Settings, LogOut, Menu, OctagonAlert, Plus,
+  LayoutDashboard, CandlestickChart, Workflow, ListOrdered, Layers, ShieldCheck, Settings, LogOut, Menu, OctagonAlert, Plus, Mail,
 } from "lucide-react";
 import { Logo } from "@/components/tm/Logo";
 import { KillSwitchButton } from "@/components/tm/KillSwitch";
 import { PlaceOrderModal } from "@/components/tm/PlaceOrderModal";
+import { EmailStatementModal } from "@/components/tm/EmailStatementModal";
 import { Badge, Button } from "@/components/tm/ui";
 import { authService, connectionService } from "@/services";
 import { useKillSwitch } from "@/hooks/queries";
@@ -41,6 +42,7 @@ function AppLayout() {
   const [user, setUser] = useState<User | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [orderModalOpen, setOrderModalOpen] = useState(false);
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
   const { data: ks } = useKillSwitch();
 
   useEffect(() => {
@@ -87,6 +89,17 @@ function AppLayout() {
             </Link>
           );
         })}
+
+        <div className="pt-2">
+          <button
+            onClick={() => setEmailModalOpen(true)}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer transition-colors"
+          >
+            <Mail className="h-4 w-4 text-primary" />
+            <span>P&amp;L Statements</span>
+            <span className="ml-auto rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">EMAIL</span>
+          </button>
+        </div>
       </nav>
       <div className="border-t p-3">
         <div className="flex items-center gap-3 rounded-md px-2 py-2">
@@ -126,13 +139,23 @@ function AppLayout() {
             <Menu className="h-5 w-5" />
           </button>
           <h2 className="text-sm font-semibold">{title}</h2>
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex items-center gap-2 sm:gap-3">
             {ks?.active ? (
               <Badge tone="danger" dot>System halted</Badge>
             ) : (
               <Badge tone="success" dot className="hidden sm:inline-flex">Broker Connected</Badge>
             )}
             <Clock />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setEmailModalOpen(true)}
+              className="gap-1.5 px-3 border-primary/30 text-primary hover:bg-primary/10"
+              title="Daily P&L Statement & SEBI Tax Breakdown"
+            >
+              <Mail className="h-4 w-4" />
+              <span className="hidden sm:inline">Email P&amp;L</span>
+            </Button>
             <Button size="sm" onClick={() => setOrderModalOpen(true)} className="gap-1 px-3">
               <Plus className="h-4 w-4" /> New Order
             </Button>
@@ -148,6 +171,7 @@ function AppLayout() {
         <main className="flex-1 p-4 lg:p-6"><Outlet /></main>
       </div>
       <PlaceOrderModal open={orderModalOpen} onClose={() => setOrderModalOpen(false)} />
+      <EmailStatementModal open={emailModalOpen} onClose={() => setEmailModalOpen(false)} defaultEmail={user.email} />
     </div>
   );
 }

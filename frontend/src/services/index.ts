@@ -30,8 +30,6 @@ let killSwitch: KillSwitchStatus = { active: false };
 const API_BASES = [
   "http://127.0.0.1:8001/api",
   "http://localhost:8001/api",
-  "http://127.0.0.1:8000/api",
-  "http://localhost:8000/api",
 ];
 let preferredBase = "http://127.0.0.1:8001/api";
 
@@ -243,10 +241,14 @@ export const connectionService = {
     const res = await fetchApi<{ connected: boolean; environment: string }>("/broker/connect", {
       method: "POST",
       body: JSON.stringify({ api_key: apiKey, api_secret: apiSecret, environment: env }),
+      throwOnError: true,
     });
-    ls()?.setItem("tm_connected", env || "simulated");
+    if (!res || !res.connected) {
+      throw new Error("Failed to authenticate session with 021 broker gateway.");
+    }
+    ls()?.setItem("tm_connected", res.environment || env || "simulated");
     ls()?.setItem("tm_ucc", apiKey || "HACK342");
-    return res ? { connected: res.connected, env: res.environment } : { connected: true, env: env || "simulated" };
+    return { connected: res.connected, env: res.environment };
   },
   isConnected() {
     return Boolean(ls()?.getItem("tm_connected"));
@@ -599,6 +601,22 @@ export const paymentService = {
   },
 };
 
+// ---------------- Email Reports & P&L Statement ----------------
+export const emailReportService = {
+  async sendPnlStatement(recipientEmail?: string): Promise<{ status: string; deliveryStatus: string; message: string; statementId: string }> {
+    const res = await fetchApi<{ status: string; deliveryStatus: string; message: string; statementId: string }>("/email/pnl-statement", {
+      method: "POST",
+      body: JSON.stringify({ recipient_email: recipientEmail }),
+      throwOnError: true,
+    });
+    return res || { status: "SUCCESS", deliveryStatus: "SIMULATED", message: "Statement processed", statementId: "" };
+  },
+  async getSmtpStatus(): Promise<{ smtpHost: string; smtpUser: string; isConfigured: boolean }> {
+    const res = await fetchApi<{ smtpHost: string; smtpUser: string; isConfigured: boolean }>("/email/smtp-status");
+    return res || { smtpHost: "smtp.gmail.com", smtpUser: "", isConfigured: false };
+  },
+};
+
 export const api = {
   ...authService,
   ...connectionService,
@@ -611,6 +629,7 @@ export const api = {
   ...subscriptionService,
   ...userService,
   ...paymentService,
+  ...emailReportService,
 };
 
 

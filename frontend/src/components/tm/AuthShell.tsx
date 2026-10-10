@@ -14,7 +14,7 @@ export function AuthShell({ title, sub, children }: { title: string; sub?: strin
           {sub && <p className="mt-1 text-sm text-muted-foreground">{sub}</p>}
           <div className="mt-6">{children}</div>
         </div>
-        <p className="mt-6 text-center text-[11px] text-muted-foreground">Demo environment · mock data · no real money</p>
+        <p className="mt-6 text-center text-[11px] text-muted-foreground">021 Developer OMS Engine · Real-time Risk Gate & Execution Environment</p>
       </div>
     </div>
   );

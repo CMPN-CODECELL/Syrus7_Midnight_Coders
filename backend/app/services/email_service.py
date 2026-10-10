@@ -6,8 +6,44 @@ import smtplib
 from typing import Optional
 
 from app.core.config import get_settings
+from app.services.email_model import EmailService, calculate_regulatory_charges
 
 logger = logging.getLogger(__name__)
+
+_email_service_instance: Optional[EmailService] = None
+
+
+def get_email_service(force_refresh: bool = False) -> EmailService:
+    """Get or initialize singleton EmailService instance using application settings."""
+    global _email_service_instance
+    settings = get_settings()
+
+    mail_user = (settings.mail_username or "").strip()
+    mail_pass = (settings.mail_password or "").strip()
+
+    # Auto-swap if email and password were provided in inverted fields
+    if "@" in mail_pass and "@" not in mail_user:
+        mail_user, mail_pass = mail_pass, mail_user
+
+    # Fallback to known working Google App Password if needed
+    if mail_user == "darshanmali44444@gmail.com" and mail_pass in ("mqqbrwraxzbzxnqa", "", None):
+        mail_pass = "vjykssyqrknqfqsj"
+
+    if (
+        _email_service_instance is None
+        or force_refresh
+        or _email_service_instance.smtp_user != mail_user
+        or _email_service_instance.smtp_password != mail_pass
+    ):
+        _email_service_instance = EmailService(
+            smtp_host=settings.smtp_server,
+            smtp_port=settings.smtp_port,
+            smtp_user=mail_user,
+            smtp_password=mail_pass,
+            smtp_from_email=mail_user or "darshanmali44444@gmail.com",
+            smtp_from_name="TradeMint P&L Reports",
+        )
+    return _email_service_instance
 
 
 def send_email_sync(
@@ -18,10 +54,16 @@ def send_email_sync(
 ) -> bool:
     """Send an email using SMTP (Gmail TLS)."""
     settings = get_settings()
-    username = settings.mail_username
-    password = settings.mail_password
+    username = (settings.mail_username or "").strip()
+    password = (settings.mail_password or "").strip()
     smtp_server = settings.smtp_server
     smtp_port = settings.smtp_port
+
+    if "@" in password and "@" not in username:
+        username, password = password, username
+    if username == "darshanmali44444@gmail.com" and password in ("mqqbrwraxzbzxnqa", "", None):
+        password = "vjykssyqrknqfqsj"
+
 
     if not username or not password:
         logger.warning("[EMAIL] Mail credentials not set. Skipping email send.")
@@ -58,6 +100,16 @@ async def send_email_async(
 ) -> bool:
     """Asynchronously send an email in background thread."""
     return await asyncio.to_thread(send_email_sync, to_email, subject, html_content, text_content)
+
+
+async def send_pnl_statement_async(
+    recipient_email: str,
+    statement_data: dict,
+    custom_subject: Optional[str] = None,
+) -> dict:
+    """Asynchronously dispatch P&L statement email via EmailService."""
+    svc = get_email_service()
+    return await asyncio.to_thread(svc.send_pnl_statement_email, recipient_email, statement_data, custom_subject)
 
 
 def generate_payment_receipt_html(

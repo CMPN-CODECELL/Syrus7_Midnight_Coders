@@ -43,9 +43,8 @@ class Settings(BaseSettings):
 
     # Razorpay Gateway & Email Notifications
     razorpay_key_id: str = "rzp_test_SFd7WR1rAUaPUA"
-    razorpay_key_secret: str = "AHqEU8tXJJ1sbjLzZgiGNNsz"
-    mail_username: str = "mqqbrwraxzbzxnqa"
-    mail_password: str = "darshanmali44444@gmail.com"
+    mail_username: str = "darshanmali44444@gmail.com"
+    mail_password: str = "vjykssyqrknqfqsj"
     smtp_server: str = "smtp.gmail.com"
     smtp_port: int = 587
 

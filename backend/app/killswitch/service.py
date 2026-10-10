@@ -284,14 +284,31 @@ class KillSwitchService:
                     price_paise=0,  # Market order
                     product=pos.product,
                     book=Book.RL,
-                    validity=Validity.IOC,  # Immediate or Cancel
+                    validity=Validity.DAY,
                     tag="kill_switch_liquidation",
                 )
                 try:
                     await self.broker.place_order(close_req)
                     positions_closed += 1
                 except Exception:
-                    pass
+                    try:
+                        ref_p = pos.average_price_paise or 100000
+                        limit_p = int(ref_p * 0.99) if side == Side.SELL else int(ref_p * 1.01)
+                        limit_req = OrderPlacementRequest(
+                            symbol=pos.symbol,
+                            exchange=pos.exchange,
+                            side=side,
+                            quantity=qty,
+                            price_paise=limit_p,
+                            product=pos.product,
+                            book=Book.RL,
+                            validity=Validity.DAY,
+                            tag="kill_switch_liquidation",
+                        )
+                        await self.broker.place_order(limit_req)
+                        positions_closed += 1
+                    except Exception:
+                        pass
 
         # Verification loop until flat or SLA timeout
         verified_flat = False

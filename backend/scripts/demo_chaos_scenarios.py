@@ -92,9 +92,6 @@ async def main():
     broker.set_partial_fill_ratio(None)
 
     broker_order = await broker.get_order(resp.order_id)
-    if broker_order and broker_order.fills:
-        for f in broker_order.fills:
-            exec_engine.handle_fill(f)
 
     strat_pos = strat2.get_position("INFY")
     print(f"  * Order ID           : {resp.order_id}")
@@ -187,8 +184,17 @@ async def main():
     print_banner("SCENARIO 5: Opposing Positions on Same Stock (Level 4)")
     print("Action: Strategy 1 enters LONG 5 RELIANCE, Strategy 2 enters SHORT 5 RELIANCE on same account...")
 
-    strat1.start()
-    strat2.start()
+    strat1.status = StrategyStatus.RUNNING
+    strat1.realized_pnl_paise = 0
+    strat1.unrealized_pnl_paise = 0
+    strat1.positions.clear()
+
+    strat2.status = StrategyStatus.RUNNING
+    strat2.realized_pnl_paise = 0
+    strat2.unrealized_pnl_paise = 0
+    strat2.positions.clear()
+
+    risk_engine.kill_switch_active = False
     risk_engine._breach_counts.pop("strat_time", None)
     risk_engine._breach_counts.pop("strat_breakout", None)
     if "strat_time" in risk_engine._order_history:
@@ -218,16 +224,6 @@ async def main():
 
     _, r_long = await exec_engine.execute_intent(intent_l4_long)
     _, r_short = await exec_engine.execute_intent(intent_l4_short)
-
-    bo_l = await broker.get_order(r_long.order_id)
-    if bo_l and bo_l.fills:
-        for f in bo_l.fills:
-            exec_engine.handle_fill(f)
-
-    bo_s = await broker.get_order(r_short.order_id)
-    if bo_s and bo_s.fills:
-        for f in bo_s.fills:
-            exec_engine.handle_fill(f)
 
     b_positions = await broker.get_positions()
     broker_reliance_net = next((p.net_quantity for p in b_positions if p.symbol.upper() == "RELIANCE"), 0)

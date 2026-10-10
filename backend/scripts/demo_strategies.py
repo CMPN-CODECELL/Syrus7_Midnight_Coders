@@ -1,6 +1,11 @@
 import asyncio
 from datetime import datetime, time, timezone
+from pathlib import Path
+import sys
 from zoneinfo import ZoneInfo
+
+# Ensure backend root is on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.broker import Mock021, OrderPlacementRequest
 from app.market_data.candle import Tick

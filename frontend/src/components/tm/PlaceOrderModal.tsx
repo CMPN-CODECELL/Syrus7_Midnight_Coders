@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, Send } from "lucide-react";
 import { Badge, Button, Field, Modal, inputCls } from "@/components/tm/ui";
-import { useInstruments, usePlaceOrder, useStrategies } from "@/hooks/queries";
+import { useCandles, useInstruments, usePlaceOrder, useStrategies } from "@/hooks/queries";
 import { inr } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +25,10 @@ export function PlaceOrderModal({ open, onClose, defaultSymbol }: PlaceOrderModa
   const { data: instruments = [] } = useInstruments();
   const placeOrder = usePlaceOrder();
 
+  const [symbol, setSymbol] = useState(defaultSymbol || "RELIANCE");
+  const { data: candles = [] } = useCandles(symbol, "1m");
+  const latestCandle = candles.length > 0 ? candles[candles.length - 1] : null;
+
   const availableSymbols = instruments.length > 0
     ? instruments.map((inst) => {
         const baseMap: Record<string, number> = { RELIANCE: 1424.0, TCS: 3410.0, INFY: 1520.0, HDFCBANK: 1645.0, TATAMOTORS: 980.0, NIFTY50: 22450.0 };
@@ -32,7 +36,6 @@ export function PlaceOrderModal({ open, onClose, defaultSymbol }: PlaceOrderModa
       })
     : DEFAULT_SYMBOLS;
 
-  const [symbol, setSymbol] = useState(defaultSymbol || "RELIANCE");
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
   const [orderType, setOrderType] = useState<"MARKET" | "LIMIT">("MARKET");
   const [quantity, setQuantity] = useState<number>(1);
@@ -47,7 +50,7 @@ export function PlaceOrderModal({ open, onClose, defaultSymbol }: PlaceOrderModa
   } | null>(null);
 
   const selectedSymbolObj = availableSymbols.find((s) => s.symbol === symbol) ?? availableSymbols[0];
-  const refPrice = selectedSymbolObj ? selectedSymbolObj.ltp : 1424.0;
+  const refPrice = latestCandle ? latestCandle.close : (selectedSymbolObj ? selectedSymbolObj.ltp : 1424.0);
   const numPrice = price ? parseFloat(price) : refPrice;
   const estValue = (numPrice || 0) * (quantity || 0);
 
@@ -91,13 +94,13 @@ export function PlaceOrderModal({ open, onClose, defaultSymbol }: PlaceOrderModa
           <div
             className={cn(
               "rounded-lg border p-4 text-sm animate-in fade-in slide-in-from-top-2",
-              lastResult.status === "FILLED"
+              lastResult.status === "FILLED" || lastResult.status === "SUBMITTED"
                 ? "border-success/30 bg-success-soft text-success"
                 : "border-destructive/30 bg-danger-soft text-destructive",
             )}
           >
             <div className="flex items-start gap-3">
-              {lastResult.status === "FILLED" ? (
+              {lastResult.status === "FILLED" || lastResult.status === "SUBMITTED" ? (
                 <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-success" />
               ) : (
                 <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
@@ -106,13 +109,17 @@ export function PlaceOrderModal({ open, onClose, defaultSymbol }: PlaceOrderModa
                 <p className="font-semibold">
                   {lastResult.status === "FILLED"
                     ? `Order FILLED @ ₹${lastResult.average_price?.toFixed(2)}`
-                    : "Order REJECTED by Risk Engine"}
+                    : lastResult.status === "SUBMITTED"
+                    ? `Order Placed with 021 Broker (#${lastResult.order_id})`
+                    : "Order Rejected"}
                 </p>
-                {lastResult.rejection_reason ? (
-                  <p className="text-xs leading-relaxed opacity-90">{lastResult.rejection_reason}</p>
-                ) : (
+                {lastResult.status === "FILLED" || lastResult.status === "SUBMITTED" ? (
                   <p className="text-xs opacity-90">
-                    Order {lastResult.order_id} routed successfully. Positions and Intraday P&L updated in real-time.
+                    Order {lastResult.order_id} routed successfully to 021 Broker. Positions and Intraday P&L updated in real-time.
+                  </p>
+                ) : (
+                  <p className="text-xs leading-relaxed opacity-90 font-medium">
+                    {lastResult.rejection_reason || "Order was rejected by the Risk Engine or Broker."}
                   </p>
                 )}
               </div>

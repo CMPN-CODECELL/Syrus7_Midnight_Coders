@@ -103,12 +103,18 @@ class BaseStrategy(ABC):
     def get_average_price(self, symbol: str) -> int:
         """Returns average entry price in paise for open position."""
         pos = self.positions.get(symbol.upper())
-        if not pos or pos["net_qty"] == 0:
+        if not pos or pos.get("net_qty", 0) == 0:
             return 0
-        if pos["net_qty"] > 0 and pos["buy_qty"] > 0:
-            return pos["buy_amt"] // pos["buy_qty"]
-        if pos["net_qty"] < 0 and pos["sell_qty"] > 0:
-            return pos["sell_amt"] // pos["sell_qty"]
+        net_qty = pos.get("net_qty", 0)
+        buy_qty = pos.get("buy_qty", 0)
+        sell_qty = pos.get("sell_qty", 0)
+        buy_amt = pos.get("buy_amt", pos.get("buy_val_paise", 0))
+        sell_amt = pos.get("sell_amt", pos.get("sell_val_paise", 0))
+
+        if net_qty > 0 and buy_qty > 0:
+            return buy_amt // buy_qty
+        if net_qty < 0 and sell_qty > 0:
+            return sell_amt // sell_qty
         return 0
 
     def start(self) -> None:

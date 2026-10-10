@@ -51,6 +51,8 @@ class OrderPlacementResponse(BaseModel):
     broker_status: BrokerOrderStatus
     message: str = ""
     rejection_reason: str | None = None
+    price_paise: int = 0
+    filled_quantity: int = 0
 
 
 class OrderCancelRequest(BaseModel):

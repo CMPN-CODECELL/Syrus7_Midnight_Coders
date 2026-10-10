@@ -199,39 +199,65 @@ async def seed_demo_data():
         print(f"[STRATEGIES] Seeded {len(strats_data)} active trading strategies.")
 
         # 3. Seed Subscriptions & Payment Records
+        # Explicit subscription mapping per user requirement:
+        # - User 1 (u_1, demo@trademint.in): ALL 5 subscriptions
+        # - User 2 (u_priya, priya.sharma@trademint.in): 3 subscriptions
+        # - User 3 (u_arjun, arjun.verma@trademint.in): 0 subscriptions
+        user_sub_mapping = {
+            "u_1": [s["id"] for s in strats_data],  # All 5 strategies
+            "u_judge": [s["id"] for s in strats_data],  # All 5 strategies
+            "u_priya": ["strat_time", "strat_breakout", "strat_ma"],  # 3 strategies
+            "u_arjun": [],  # 0 strategies (no subscriptions)
+            "u_karthik": ["strat_time"],  # 1 strategy
+        }
+
         sub_count = 0
         now = datetime.now(timezone.utc)
-        for uid in created_users:
+        for uid, allowed_strat_ids in user_sub_mapping.items():
             for s_info in strats_data:
-                existing = await SubscriptionRepository.get_active_user_subscription_for_strategy(
-                    session, uid, s_info["id"]
-                )
-                if not existing:
-                    sub = await SubscriptionRepository.create_or_renew_subscription(
-                        db=session,
-                        user_id=uid,
-                        strategy_id=s_info["id"],
-                        plan_tier="PRO" if uid in ["u_1", "u_judge"] else "FREE",
-                        amount_paid_paise=s_info["price"],
-                        duration_days=30,
-                        payment_reference=f"REF_SEED_{uid}_{s_info['id']}",
+                sid = s_info["id"]
+                res = await session.execute(
+                    select(Subscription).where(
+                        Subscription.user_id == uid,
+                        Subscription.strategy_id == sid,
                     )
-                    sub_count += 1
+                )
+                existing = res.scalar_one_or_none()
 
-                    if s_info["price"] > 0:
-                        await PaymentRepository.create_transaction(
+                if sid in allowed_strat_ids:
+                    if not existing:
+                        sub = await SubscriptionRepository.create_or_renew_subscription(
                             db=session,
                             user_id=uid,
-                            subscription_id=sub.id,
-                            amount_paise=s_info["price"],
-                            payment_method="WALLET",
-                            transaction_type="SUBSCRIPTION_PURCHASE",
-                            status="SUCCESS",
-                            remarks=f"Subscription purchase for {s_info['name']}",
+                            strategy_id=sid,
+                            plan_tier="PRO" if uid in ["u_1", "u_judge"] else "FREE",
+                            amount_paid_paise=s_info["price"],
+                            duration_days=30,
+                            payment_reference=f"REF_SEED_{uid}_{sid}",
                         )
+                        sub_count += 1
+                        if s_info["price"] > 0:
+                            await PaymentRepository.create_transaction(
+                                db=session,
+                                user_id=uid,
+                                subscription_id=sub.id,
+                                amount_paise=s_info["price"],
+                                payment_method="WALLET",
+                                transaction_type="SUBSCRIPTION_PURCHASE",
+                                status="SUCCESS",
+                                remarks=f"Subscription purchase for {s_info['name']}",
+                            )
+                    else:
+                        existing.is_active = True
+                        existing.status = "ACTIVE"
+                        sub_count += 1
+                else:
+                    if existing:
+                        existing.is_active = False
+                        existing.status = "CANCELLED"
 
         await session.commit()
-        print(f"[SUBSCRIPTIONS] Created {sub_count} user-strategy subscriptions and payment ledgers.")
+        print(f"[SUBSCRIPTIONS] Created {sub_count} user-strategy subscriptions (User 1: All 5, User 2: 3, User 3: 0).")
 
         # 4. Seed Historical Orders and Fills for Judge Dashboard
         orders_data = [

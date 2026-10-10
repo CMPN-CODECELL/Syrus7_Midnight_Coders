@@ -1,6 +1,9 @@
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Badge, Card, CardHeader, Pnl, orderTone } from "@/components/tm/ui";
+import { Mail, ShieldCheck, ArrowRight } from "lucide-react";
+import { Badge, Button, Card, CardHeader, Pnl, orderTone } from "@/components/tm/ui";
+import { EmailStatementModal } from "@/components/tm/EmailStatementModal";
 import { useAccount, useKillSwitch, useOrders, usePnlHistory, useStrategies } from "@/hooks/queries";
 import { hms, inr, statusLabel } from "@/lib/format";
 
@@ -16,10 +19,23 @@ export const Route = createFileRoute("/_app/dashboard")({
   component: Dashboard,
 });
 
-function Metric({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
+function Metric({
+  label,
+  children,
+  hint,
+  action,
+}: {
+  label: string;
+  children: React.ReactNode;
+  hint?: string;
+  action?: React.ReactNode;
+}) {
   return (
     <Card className="p-5">
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+        {action}
+      </div>
       <div className="mt-2 text-2xl font-semibold">{children}</div>
       {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
     </Card>
@@ -32,13 +48,57 @@ function Dashboard() {
   const { data: strategies = [] } = useStrategies();
   const { data: orders = [] } = useOrders();
   const { data: ks } = useKillSwitch();
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
 
   return (
     <div className="space-y-6">
+      {/* Daily P&L Statement & Regulatory Tax Breakdown Banner */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 rounded-xl border border-primary/20 bg-primary/5 p-4 shadow-sm">
+        <div className="flex items-start sm:items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Mail className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold">Daily P&amp;L Statement &amp; Regulatory Tax Invoicing</h3>
+              <Badge tone="success" dot className="hidden sm:inline-flex">
+                SEBI SCRA Rule 15
+              </Badge>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Automated institutional statement with itemized tariffs (Brokerage ₹20, STT 0.025%, GST 18%, Stamp Duty) dispatched via SMTP.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <Button
+            size="sm"
+            onClick={() => setEmailModalOpen(true)}
+            className="gap-1.5 w-full sm:w-auto shadow-sm"
+          >
+            <Mail className="h-4 w-4" /> Email P&amp;L Statement
+          </Button>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="Account Value"><span className="num">{acc ? inr(acc.accountValue) : "—"}</span></Metric>
         <Metric label="Available Balance"><span className="num">{acc ? inr(acc.availableBalance) : "—"}</span></Metric>
-        <Metric label="Today's P&L" hint="Realised + unrealised">{acc ? <Pnl value={acc.todayPnl} /> : "—"}</Metric>
+        <Metric
+          label="Today's P&L"
+          hint="Realised + unrealised"
+          action={
+            <button
+              onClick={() => setEmailModalOpen(true)}
+              className="text-[11px] font-medium text-primary hover:underline inline-flex items-center gap-1 cursor-pointer"
+              title="Email P&L Statement"
+            >
+              <Mail className="h-3 w-3" /> Email Report
+            </button>
+          }
+        >
+          {acc ? <Pnl value={acc.todayPnl} /> : "—"}
+        </Metric>
         <Metric label="Risk Status" hint={ks?.active ? "Kill switch engaged" : "All limits within range"}>
           {ks?.active ? <Badge tone="danger" dot className="text-sm">Halted</Badge> : <Badge tone="success" dot className="text-sm">{acc?.riskStatus ?? "SAFE"}</Badge>}
         </Metric>
@@ -110,6 +170,8 @@ function Dashboard() {
           </table>
         </div>
       </Card>
+      <EmailStatementModal open={emailModalOpen} onClose={() => setEmailModalOpen(false)} />
     </div>
   );
 }
+

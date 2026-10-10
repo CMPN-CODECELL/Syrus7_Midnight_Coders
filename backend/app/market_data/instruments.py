@@ -109,6 +109,29 @@ class InstrumentRegistry:
             self.load()
         return self._by_token.get(token)
 
+    def list_all(self, limit: int = 100) -> list[InstrumentInfo]:
+        """Return registered instruments, prioritizing top active equities."""
+        if not self._loaded:
+            self.load()
+        key_symbols = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "TATAMOTORS", "NIFTY50", "SBIN", "ICICIBANK", "ITC", "BHARTIARTL"]
+        result: list[InstrumentInfo] = []
+        seen_tokens: set[int] = set()
+
+        for sym in key_symbols:
+            inst = self.find_by_symbol(sym)
+            if inst and inst.token not in seen_tokens:
+                result.append(inst)
+                seen_tokens.add(inst.token)
+
+        for token, inst in self._by_token.items():
+            if token not in seen_tokens:
+                result.append(inst)
+                seen_tokens.add(token)
+            if len(result) >= limit:
+                break
+
+        return result
+
 
 # Global singleton instance for easy access across the platform
 _default_registry: Optional[InstrumentRegistry] = None

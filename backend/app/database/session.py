@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 import logging
+from pathlib import Path
 import socket
 from urllib.parse import urlparse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -9,6 +10,10 @@ from app.core.config import get_settings
 
 logger = logging.getLogger("tradeshield.database")
 settings = get_settings()
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+DEFAULT_SQLITE_FILE = BACKEND_DIR / "tradeshield.db"
+DEFAULT_SQLITE_URL = f"sqlite+aiosqlite:///{DEFAULT_SQLITE_FILE.as_posix()}"
 
 
 def _is_postgres_reachable(db_url: str) -> bool:
@@ -27,7 +32,15 @@ def _is_postgres_reachable(db_url: str) -> bool:
 
 
 # Determine active database URL (graceful local fallback when Docker/Postgres is offline)
-if _is_postgres_reachable(settings.database_url):
+if settings.database_url.startswith("sqlite"):
+    ACTIVE_DATABASE_URL = settings.database_url
+    engine = create_async_engine(
+        ACTIVE_DATABASE_URL,
+        echo=False,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+elif _is_postgres_reachable(settings.database_url):
     ACTIVE_DATABASE_URL = settings.database_url
     engine = create_async_engine(
         ACTIVE_DATABASE_URL,
@@ -36,7 +49,7 @@ if _is_postgres_reachable(settings.database_url):
         pool_pre_ping=True,
     )
 else:
-    ACTIVE_DATABASE_URL = "sqlite+aiosqlite:///./tradeshield.db"
+    ACTIVE_DATABASE_URL = DEFAULT_SQLITE_URL
     logger.info(
         "PostgreSQL host at %s unreachable. Initializing local SQLite database: %s",
         settings.database_url,
@@ -85,7 +98,7 @@ async def init_db() -> None:
             await conn.run_sync(Base.metadata.create_all)
             logger.info("Successfully initialized database tables: %s", ACTIVE_DATABASE_URL)
     except Exception as exc:
-        fallback_url = "sqlite+aiosqlite:///./tradeshield.db"
+        fallback_url = DEFAULT_SQLITE_URL
         logger.warning(
             "Primary database %s failed (%s). Falling back to SQLite: %s",
             ACTIVE_DATABASE_URL,

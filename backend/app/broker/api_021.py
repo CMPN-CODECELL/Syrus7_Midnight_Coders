@@ -1,5 +1,8 @@
 import asyncio
 from datetime import datetime, timezone
+import logging
+import random
+import time
 from typing import Any, Optional
 import httpx
 
@@ -37,6 +40,54 @@ from app.core.enums import (
 )
 from app.market_data.instruments import InstrumentRegistry, get_instrument_registry
 
+logger = logging.getLogger(__name__)
+
+
+class AsyncTokenBucket:
+    """Proactive client-side rate limiter / token bucket throttle.
+
+    Smooths out bursts and pre-emptively avoids HTTP 429 rate limit rejections
+    from the 021 broker API gateway.
+    """
+
+    def __init__(self, rate: float = 10.0, capacity: float = 10.0) -> None:
+        """
+        :param rate: tokens added per second (e.g. 10 requests / sec)
+        :param capacity: maximum burst bucket capacity
+        """
+        self.rate = float(rate)
+        self.capacity = float(capacity)
+        self.tokens = float(capacity)
+        self.last_refill = time.monotonic()
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        try:
+            cur_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            cur_loop = None
+        if not hasattr(self, "_active_lock") or getattr(self, "_active_lock_loop", None) != cur_loop:
+            self._active_lock = asyncio.Lock()
+            self._active_lock_loop = cur_loop
+        return self._active_lock
+
+    async def acquire(self, tokens: float = 1.0) -> None:
+        """Wait asynchronously until sufficient tokens are available and deduct them."""
+        async with self.lock:
+            while True:
+                now = time.monotonic()
+                elapsed = now - self.last_refill
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+                self.last_refill = now
+
+                if self.tokens >= tokens:
+                    self.tokens -= tokens
+                    return
+
+                needed = tokens - self.tokens
+                wait_time = max(0.01, needed / self.rate)
+                await asyncio.sleep(wait_time)
+
 
 class Broker021(BrokerInterface):
     """Production adapter for 021 Developer REST APIs.
@@ -62,23 +113,54 @@ class Broker021(BrokerInterface):
 
         self._access_token: Optional[str] = None
         self._token_expires_at: Optional[datetime] = None
-        self._lock = asyncio.Lock()
 
-        # Shared HTTP client
+        # Proactive client-side rate throttle (10 requests/sec default capacity)
+        self._rate_limiter = AsyncTokenBucket(rate=10.0, capacity=10.0)
+
+        # Shared HTTP client (lazily initialized on the active event loop)
+        self._client: Optional[httpx.AsyncClient] = None
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        try:
+            cur_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            cur_loop = None
+        if not hasattr(self, "_active_lock") or getattr(self, "_active_lock_loop", None) != cur_loop:
+            self._active_lock = asyncio.Lock()
+            self._active_lock_loop = cur_loop
+        return self._active_lock
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return or lazily initialize httpx.AsyncClient tied to the active event loop."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if self._client is not None and not getattr(self._client, "is_closed", False):
+            client_loop = getattr(self, "_client_loop", None)
+            if client_loop is None or client_loop == current_loop:
+                return self._client
+
         self._client = httpx.AsyncClient(
             timeout=float(self.settings.broker_call_timeout_seconds),
             headers={"Content-Type": "application/json"},
         )
+        self._client_loop = current_loop
+        return self._client
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
-        await self._client.aclose()
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
 
     # ---------- Authentication Management ----------
 
     async def get_valid_token(self, force_refresh: bool = False) -> str:
         """Authenticate or reuse cached token. Refreshes if expired."""
-        async with self._lock:
+        async with self.lock:
             now = datetime.now(timezone.utc)
             if (
                 not force_refresh
@@ -94,33 +176,45 @@ class Broker021(BrokerInterface):
                 "password": self.settings.api_password,
             }
 
-            try:
-                resp = await self._client.post(auth_url, json=payload)
-            except httpx.TimeoutException:
-                raise BrokerTimeoutError("Auth request timed out")
-            except httpx.RequestError as exc:
-                raise BrokerServerError(f"Auth connection error: {exc}")
+            for auth_attempt in range(3):
+                try:
+                    resp = await self._get_client().post(auth_url, json=payload)
+                except httpx.TimeoutException:
+                    if auth_attempt < 2:
+                        await asyncio.sleep(0.5 * (2 ** auth_attempt))
+                        continue
+                    raise BrokerTimeoutError("Auth request timed out")
+                except httpx.RequestError as exc:
+                    if auth_attempt < 2:
+                        await asyncio.sleep(0.5 * (2 ** auth_attempt))
+                        continue
+                    raise BrokerServerError(f"Auth connection error: {exc}")
 
-            if resp.status_code == 401:
-                raise BrokerAuthExpiredError("Invalid 021 UCC or password", status_code=401)
-            elif resp.status_code != 200:
-                raise BrokerServerError(f"Auth failed with HTTP {resp.status_code}: {resp.text}", status_code=resp.status_code)
+                if resp.status_code == 401:
+                    raise BrokerAuthExpiredError("Invalid 021 UCC or password", status_code=401)
+                elif resp.status_code in (500, 502, 503, 504):
+                    if auth_attempt < 2:
+                        await asyncio.sleep(0.5 * (2 ** auth_attempt))
+                        continue
+                    raise BrokerServerError(f"Auth failed with HTTP {resp.status_code}: {resp.text}", status_code=resp.status_code)
+                elif resp.status_code != 200:
+                    raise BrokerServerError(f"Auth failed with HTTP {resp.status_code}: {resp.text}", status_code=resp.status_code)
 
-            body = resp.json()
-            if not body.get("success") or not body.get("data"):
-                raise BrokerServerError(f"Auth rejected: {body.get('error')}")
+                body = resp.json()
+                if not body.get("success") or not body.get("data"):
+                    raise BrokerServerError(f"Auth rejected: {body.get('error')}")
 
-            data = body["data"]
-            self._access_token = data["accessToken"]
-            # Parse expiry
-            try:
-                exp_str = data["expiresAt"]
-                self._token_expires_at = datetime.fromisoformat(exp_str).astimezone(timezone.utc)
-            except Exception:
-                # Default safety: valid for 1 hour
-                self._token_expires_at = datetime.now(timezone.utc)
+                data = body["data"]
+                self._access_token = data["accessToken"]
+                # Parse expiry
+                try:
+                    exp_str = data["expiresAt"]
+                    self._token_expires_at = datetime.fromisoformat(exp_str).astimezone(timezone.utc)
+                except Exception:
+                    # Default safety: valid for 1 hour
+                    self._token_expires_at = datetime.now(timezone.utc)
 
-            return self._access_token
+                return self._access_token
 
     async def _request(
         self,
@@ -129,69 +223,143 @@ class Broker021(BrokerInterface):
         json: Any = None,
         params: Any = None,
         retry_auth: bool = True,
+        max_rate_limit_retries: int = 3,
+        max_server_retries: int = 3,
+        idempotency_key: Optional[str] = None,
     ) -> httpx.Response:
-        """Execute authenticated request with auto-retry on 401."""
-        token = await self.get_valid_token()
-        headers = {"Authorization": f"Bearer {token}"}
+        """Execute authenticated request with client-side throttle, token refresh, and exponential backoff on 429, 500, and 503.
+
+        If *idempotency_key* is supplied (typically the ``client_order_id``),
+        every attempt of this request will include an ``X-Idempotency-Key``
+        header so the broker can deduplicate retried POST requests.
+        """
         url = f"{self.base_url}{path}"
+        can_retry_auth = retry_auth
+        total_attempts = max(max_rate_limit_retries, max_server_retries) + 1
 
-        try:
-            resp = await self._client.request(
-                method,
-                url,
-                json=json,
-                params=params,
-                headers=headers,
-            )
-        except httpx.TimeoutException:
-            raise BrokerTimeoutError(f"Request to {path} timed out")
-        except httpx.RequestError as exc:
-            raise BrokerServerError(f"Network error on {path}: {exc}")
+        for attempt in range(total_attempts):
+            # 1. Proactive client-side token bucket rate throttle
+            await self._rate_limiter.acquire(1.0)
 
-        # If token was revoked externally or expired, refresh once and retry
-        if resp.status_code == 401 and retry_auth:
-            token = await self.get_valid_token(force_refresh=True)
-            headers["Authorization"] = f"Bearer {token}"
+            # 2. Get active authentication session token
+            token = await self.get_valid_token()
+            headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
+            if idempotency_key:
+                headers["X-Idempotency-Key"] = idempotency_key
+
             try:
-                resp = await self._client.request(
+                resp = await self._get_client().request(
                     method,
                     url,
                     json=json,
                     params=params,
                     headers=headers,
                 )
-            except Exception as e:
-                raise BrokerServerError(f"Retry after 401 failed: {e}")
+            except httpx.TimeoutException:
+                if attempt < max_server_retries:
+                    delay = min(4.0, (0.5 * (2 ** attempt)) + random.uniform(0.05, 0.2))
+                    logger.warning(
+                        f"[BROKER TIMEOUT] Request to {path} timed out. "
+                        f"Retrying in {delay:.2f}s (retry {attempt + 1}/{max_server_retries})..."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise BrokerTimeoutError(f"Request to {path} timed out after {max_server_retries} retries")
+            except httpx.RequestError as exc:
+                if attempt < max_server_retries:
+                    delay = min(4.0, (0.5 * (2 ** attempt)) + random.uniform(0.05, 0.2))
+                    logger.warning(
+                        f"[BROKER NETWORK ERROR] Network error on {path}: {exc}. "
+                        f"Retrying in {delay:.2f}s (retry {attempt + 1}/{max_server_retries})..."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise BrokerServerError(f"Network error on {path}: {exc}")
 
-        # Classify broker responses
-        if resp.status_code == 401:
-            raise BrokerAuthExpiredError("Unauthorized: Token revoked or invalid", status_code=401)
-        elif resp.status_code == 422:
-            body = resp.json() if resp.text else {}
-            err_msg = body.get("error") or "Order blocked by safe mode"
-            raise BrokerSafeModeError(err_msg, status_code=422, raw_response=body)
-        elif resp.status_code == 429:
-            raise BrokerRateLimitError("021 Rate limit exceeded", status_code=429)
-        elif resp.status_code == 500:
-            body = resp.json() if resp.text else {}
-            err_msg = body.get("error") or "Internal broker error"
-            # 021 spec: 500 with risk reason means order was rejected by risk checks
-            if not body.get("success") and body.get("error"):
-                raise BrokerRiskRejectedError(err_msg, status_code=500, raw_response=body)
-            raise BrokerServerError(err_msg, status_code=500, raw_response=body)
-        elif resp.status_code == 503:
-            raise BrokerServerError("021 Service unavailable (503)", status_code=503)
-        elif resp.status_code == 400:
-            body = resp.json() if resp.text else {}
-            err_msg = body.get("error") or resp.text
-            raise BrokerBadRequestError(f"Bad request: {err_msg}", status_code=400, raw_response=body)
+            # 3. Handle 401 Unauthorized (refresh once and retry)
+            if resp.status_code == 401 and can_retry_auth:
+                logger.info(f"[BROKER 401] Token invalid on {method} {path}. Refreshing session...")
+                await self.get_valid_token(force_refresh=True)
+                can_retry_auth = False
+                continue
 
-        return resp
+            # 4. Handle 429 Rate Limit with exponential backoff & jitter
+            if resp.status_code == 429:
+                if attempt < max_rate_limit_retries:
+                    retry_after_hdr = resp.headers.get("Retry-After")
+                    if retry_after_hdr:
+                        try:
+                            delay = max(0.1, float(retry_after_hdr))
+                        except ValueError:
+                            delay = 0.5 * (2 ** attempt)
+                    else:
+                        delay = min(4.0, (0.5 * (2 ** attempt)) + random.uniform(0.05, 0.2))
+
+                    logger.warning(
+                        f"[BROKER 429 RATE LIMIT] Rate limited on {method} {path}. "
+                        f"Backing off for {delay:.2f}s (retry {attempt + 1}/{max_rate_limit_retries})..."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                body = resp.json() if resp.text else {}
+                err_msg = body.get("error") or "021 Rate limit exceeded after retries"
+                logger.error(f"[BROKER 429 RATE LIMIT] Retries exhausted ({max_rate_limit_retries}) on {method} {path}")
+                raise BrokerRateLimitError(err_msg, status_code=429, raw_response=body)
+
+            # 5. Handle HTTP 500, 502, 503, 504 with automatic retries and exponential backoff
+            if resp.status_code in (500, 502, 503, 504):
+                body = {}
+                try:
+                    body = resp.json() if resp.text else {}
+                except Exception:
+                    body = {"raw": resp.text}
+
+                # 021 spec: If 500 contains a specific risk rejection payload, treat as risk rejection rather than retryable outage
+                if resp.status_code == 500 and not body.get("success") and body.get("error") and ("risk" in str(body.get("error")).lower() or "margin" in str(body.get("error")).lower() or "limit" in str(body.get("error")).lower() or "rejected" in str(body.get("error")).lower()):
+                    err_msg = body.get("error") or "Order rejected by 021 risk checks"
+                    raise BrokerRiskRejectedError(err_msg, status_code=500, raw_response=body)
+
+                if attempt < max_server_retries:
+                    delay = min(4.0, (0.5 * (2 ** attempt)) + random.uniform(0.05, 0.2))
+                    logger.warning(
+                        f"[BROKER HTTP {resp.status_code}] Transient server error on {method} {path}. "
+                        f"Retrying in {delay:.2f}s (retry {attempt + 1}/{max_server_retries})..."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                err_msg = body.get("error") or f"021 Server error ({resp.status_code}) after {max_server_retries} retries"
+                logger.error(f"[BROKER {resp.status_code}] Retries exhausted ({max_server_retries}) on {method} {path}")
+                raise BrokerServerError(err_msg, status_code=resp.status_code, raw_response=body)
+
+            # 6. Classify other broker responses
+            if resp.status_code == 401:
+                raise BrokerAuthExpiredError("Unauthorized: Token revoked or invalid", status_code=401)
+            elif resp.status_code == 422:
+                body = resp.json() if resp.text else {}
+                err_msg = body.get("error") or "Order blocked by safe mode"
+                raise BrokerSafeModeError(err_msg, status_code=422, raw_response=body)
+            elif resp.status_code == 400:
+                body = resp.json() if resp.text else {}
+                err_msg = body.get("error") or resp.text
+                raise BrokerBadRequestError(f"Bad request: {err_msg}", status_code=400, raw_response=body)
+
+            return resp
+
+        # Fallback if loop ends
+        raise BrokerServerError(f"021 Request failed after {total_attempts} attempts", status_code=500)
 
     # ---------- BrokerInterface Implementation ----------
 
     async def place_order(self, request: OrderPlacementRequest) -> OrderPlacementResponse:
-        """Place an order with 021 Developer API."""
+        """Place an order with 021 Developer API.
+
+        Idempotent: sends the client_order_id as both an HTTP
+        ``X-Idempotency-Key`` header **and** a ``clientOrderId`` JSON field.
+        If the broker has already processed an order with the same key it
+        returns the original acknowledgement instead of creating a duplicate.
+        """
         # 1. Resolve Instrument token
         inst = self.registry.find_by_symbol(request.symbol, request.exchange)
         if not inst:
@@ -212,11 +380,45 @@ class Broker021(BrokerInterface):
             "book": request.book.value,
             "product": request.product.value,
             "validity": request.validity.value,
+            # Embed the client-side dedup key in the payload so the broker
+            # can correlate retries at the application layer.
+            "clientOrderId": request.client_order_id,
         }
         if request.trigger_price_paise > 0:
             payload["trigger"] = request.trigger_price_paise
 
-        resp = await self._request("POST", "/orders", json=payload)
+        try:
+            resp = await self._request(
+                "POST",
+                "/orders",
+                json=payload,
+                idempotency_key=request.client_order_id,
+            )
+        except BrokerSafeModeError as bsm:
+            # If rejected because market orders are not permitted (e.g., pre-open session or wide bid-ask spread),
+            # fall back gracefully to a marketable limit order at instrument mid-circuit price.
+            if payload["price"] == 0 and any(kw in str(bsm).lower() for kw in ("market order", "spread", "pre-open")):
+                if inst and inst.lower_circuit_paise > 0 and inst.upper_circuit_paise > 0:
+                    fallback_price = (inst.lower_circuit_paise + inst.upper_circuit_paise) // 2
+                else:
+                    fallback_price = request.trigger_price_paise or 100000
+                if inst and inst.tick_size_paise > 1:
+                    fallback_price = int(round(fallback_price / inst.tick_size_paise) * inst.tick_size_paise)
+
+                logger.warning(
+                    f"[BROKER SAFE MODE] Market order blocked ({bsm}). "
+                    f"Retrying as marketable limit order with price {fallback_price} paise..."
+                )
+                payload["price"] = fallback_price
+                resp = await self._request(
+                    "POST",
+                    "/orders",
+                    json=payload,
+                    idempotency_key=f"{request.client_order_id}-lim",
+                )
+            else:
+                raise
+
         data = resp.json()
 
         if not data.get("success"):
@@ -397,6 +599,30 @@ class Broker021(BrokerInterface):
                 status = s
                 break
 
+        epoch = item.get("time") or item.get("lastActivity")
+        order_time = (
+            datetime.fromtimestamp(epoch, tz=timezone.utc)
+            if (epoch and isinstance(epoch, (int, float)) and epoch > 1000000000)
+            else datetime.now(timezone.utc)
+        )
+
+        filled_q = abs(int(item.get("qtyTraded", 0)))
+        fills_list = []
+        if filled_q > 0:
+            from app.broker.models import TradeFill
+            fills_list.append(
+                TradeFill(
+                    order_id=str(item.get("orderId", "")),
+                    client_order_id=str(item.get("clientOrderId", "")),
+                    symbol=symbol,
+                    exchange=Exchange.NSE,
+                    side=side,
+                    quantity=filled_q,
+                    price_paise=int(item.get("price", 0)),
+                    timestamp=order_time,
+                )
+            )
+
         return BrokerOrder(
             order_id=str(item.get("orderId", "")),
             client_order_id=str(item.get("clientOrderId", "")),
@@ -406,11 +632,14 @@ class Broker021(BrokerInterface):
             product=Product(item.get("product", Product.INTRADAY.value)),
             book=Book(item.get("book", Book.RL.value)),
             validity=Validity(item.get("validity", Validity.DAY.value)),
-            quantity=abs(raw_qty),
+            quantity=abs(raw_qty) if abs(raw_qty) > 0 else max(1, filled_q),
             price_paise=int(item.get("price", 0)),
             trigger_price_paise=int(item.get("triggerPrice", 0)),
             status=status,
-            filled_quantity=abs(int(item.get("qtyTraded", 0))),
+            filled_quantity=filled_q,
             average_price_paise=int(item.get("price", 0)),
             rejection_reason=item.get("reason", ""),
+            fills=fills_list,
+            created_at=order_time,
+            updated_at=order_time,
         )
