@@ -12,9 +12,9 @@
 
 ---
 
-## 📸 Platform Preview
+## 📸 Email Preview
 
-| Live Trading Terminal & Dashboard | Risk Management & Strategy Studio |
+
 | :---: | :---: |
 | ![TradeMint Terminal](backend/trademint%20ss.png) | ![TradeMint Controls](backend/trademint%20ss1.png) |
 
