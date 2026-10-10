@@ -5,6 +5,7 @@ import pytest
 
 from app.core.enums import Timeframe
 from app.market_data import (
+    Candle,
     CandleAggregator,
     Tick,
     decode_full_nse_packet,
@@ -100,3 +101,78 @@ def test_candle_aggregator_dict_and_model_interop():
     assert closed.close_paise == 251500
     assert closed.volume == 250
     assert closed.is_closed is True
+
+
+def test_empty_minute_gap_handling():
+    closed_candles = []
+    agg = CandleAggregator(Timeframe.M1, on_candle_closed=lambda c: closed_candles.append(c))
+
+    try:
+        from zoneinfo import ZoneInfo
+        ist = ZoneInfo("Asia/Kolkata")
+    except Exception:
+        from datetime import timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+
+    t1 = datetime(2026, 10, 9, 9, 15, 10, tzinfo=ist)
+    t2 = datetime(2026, 10, 9, 9, 18, 15, tzinfo=ist)  # 3 minutes gap (16:00 and 17:00 empty)
+
+    agg.process_tick({"symbol": "INFY", "ltp": 1500.0, "volume": 1000, "exchange_time": t1.isoformat()})
+    agg.process_tick({"symbol": "INFY", "ltp": 1510.0, "volume": 500, "exchange_time": t2.isoformat()})
+
+    # Total closed candles should be 3: 09:15 (real), 09:16 (empty gap), 09:17 (empty gap)
+    history = agg.get_history("INFY")
+    assert len(history) == 3
+    assert len(closed_candles) == 3
+
+    # Check 09:15 real candle
+    assert history[0].close_paise == 150000
+    assert history[0].volume == 1000
+
+    # Check 09:16 carry-forward candle
+    assert history[1].open_paise == 150000
+    assert history[1].high_paise == 150000
+    assert history[1].low_paise == 150000
+    assert history[1].close_paise == 150000
+    assert history[1].volume == 0
+
+    # Check 09:17 carry-forward candle
+    assert history[2].open_paise == 150000
+    assert history[2].close_paise == 150000
+    assert history[2].volume == 0
+
+
+def test_strategy_entry_condition_uses_candles():
+    from app.strategies.moving_average import MovingAverageCrossStrategy
+    from app.core.enums import StrategyStatus, Side
+
+    strategy = MovingAverageCrossStrategy(
+        strategy_id="strat-ma-1",
+        symbol="TCS",
+        timeframe=Timeframe.M1,
+        fast_period=2,
+        slow_period=3,
+    )
+    strategy.start()
+
+    # Feed closed candles to strategy to cause a golden crossover
+    c1 = Candle(symbol="TCS", timeframe=Timeframe.M1, open_paise=1000, high_paise=1000, low_paise=1000, close_paise=1000, volume=10, start_time=datetime.now(timezone.utc), is_closed=True)
+    c2 = Candle(symbol="TCS", timeframe=Timeframe.M1, open_paise=950, high_paise=950, low_paise=950, close_paise=950, volume=10, start_time=datetime.now(timezone.utc), is_closed=True)
+    c3 = Candle(symbol="TCS", timeframe=Timeframe.M1, open_paise=900, high_paise=900, low_paise=900, close_paise=900, volume=10, start_time=datetime.now(timezone.utc), is_closed=True)
+    c4 = Candle(symbol="TCS", timeframe=Timeframe.M1, open_paise=1200, high_paise=1200, low_paise=1200, close_paise=1200, volume=10, start_time=datetime.now(timezone.utc), is_closed=True)
+
+    intents1 = strategy.on_candle(c1)
+    intents2 = strategy.on_candle(c2)
+    intents3 = strategy.on_candle(c3)
+    # Slow SMA = (1000+950+900)/3 = 950, Fast SMA = (950+900)/2 = 925 (Fast <= Slow)
+
+    intents4 = strategy.on_candle(c4)
+    # Slow SMA = (950+900+1200)/3 = 1016.6, Fast SMA = (900+1200)/2 = 1050 (Fast > Slow -> Golden Cross)
+
+    assert len(intents4) == 1
+    intent = intents4[0]
+    assert intent.side == Side.BUY
+    assert intent.symbol == "TCS"
+    assert intent.price_paise == 1200
+    assert strategy.in_trade is True
+

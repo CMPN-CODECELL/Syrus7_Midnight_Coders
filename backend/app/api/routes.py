@@ -7,16 +7,25 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel, Field, ConfigDict
-from app.api.deps import get_current_user, get_optional_user
+from app.api.deps import get_current_admin, get_current_user, get_optional_user
 from app.api.schemas import (
     AuthResponse,
+    BuySubscriptionRequest,
+    BuySubscriptionResponse,
+    CancelSubscriptionRequest,
     ChangePasswordRequest,
+    CreateUserRequest,
     ForgotPasswordRequest,
     LoginRequest,
+    PaymentTransactionResponse,
     RegisterRequest,
     ResetPasswordRequest,
+    SubscriptionPlanResponse,
     UpdateProfileRequest,
+    UpdateUserAdminRequest,
+    UserListResponse,
     UserResponse,
+    WalletTopUpRequest,
 )
 from app.broker.api_021 import Broker021
 from app.broker.mock_021 import Mock021
@@ -30,8 +39,17 @@ from app.core.security import (
     hash_reset_token,
     verify_password,
 )
-from app.database.models import RiskEventRecord, StrategyRecord, Subscription, User
+from app.database.models import PaymentTransaction, RiskEventRecord, StrategyRecord, Subscription, SubscriptionPlan, User, UserActionLog
+from app.database.repositories import (
+    ActivityRepository,
+    OrderRepository,
+    PaymentRepository,
+    StrategyRepository,
+    SubscriptionRepository,
+    UserRepository,
+)
 from app.database.session import AsyncSessionLocal, get_db
+
 from app.execution.engine import ExecutionEngine
 from app.killswitch.service import KillSwitchService
 from app.recovery.service import RecoveryService
@@ -44,6 +62,24 @@ from app.strategies.moving_average import MovingAverageCrossStrategy
 from app.strategies.time_based import TimeBasedStrategy
 
 router = APIRouter(prefix="/api")
+
+
+def make_user_response(user: User) -> UserResponse:
+    bal_paise = user.account_balance_paise if user.account_balance_paise is not None else 10000000
+    return UserResponse(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        role=user.role,
+        api_ucc=user.api_ucc or "HACK342",
+        account_balance_paise=bal_paise,
+        account_balance_inr=round(bal_paise / 100, 2),
+        subscription_tier=user.subscription_tier or "FREE",
+        notifications_enabled=user.notifications_enabled,
+        theme=user.theme or "light",
+        created_at=user.created_at.isoformat() if user.created_at else None,
+    )
+
 
 # Singleton state for the API server
 settings = get_settings()
@@ -152,30 +188,25 @@ manager.start_all()
 @router.post("/auth/signup", response_model=AuthResponse)
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
     """Register a new user account with hashed password, initial preferences, and default strategy subscriptions."""
-    existing = await db.execute(select(User).where(User.email == req.email))
-    if existing.scalar_one_or_none():
+    existing = await UserRepository.get_by_email(db, req.email)
+    if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An account with this email address already exists",
         )
 
-    user_id = f"u_{uuid.uuid4().hex[:12]}"
-    pwd_hash = hash_password(req.password)
-    user = User(
-        id=user_id,
+    user = await UserRepository.create_user(
+        db=db,
         name=req.name,
         email=req.email,
-        password_hash=pwd_hash,
+        password=req.password,
         role="user",
-        is_active=True,
         api_ucc=req.api_ucc or settings.api_ucc or "HACK342",
-        notifications_enabled=True,
-        theme="light",
+        account_balance_paise=10000000,  # Default ₹100,000.00 demo balance
+        subscription_tier="FREE",
     )
-    db.add(user)
-    await db.flush()
 
-    # Automatically persist strategy subscriptions to database and sync to StrategyManager
+    # Automatically persist default strategy subscriptions to database and sync to StrategyManager
     default_strats = ["strat_time", "strat_breakout", "strat_ma"]
     for sid in default_strats:
         s_rec = await db.get(StrategyRecord, sid)
@@ -193,7 +224,14 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)) -> 
             )
             await db.flush()
 
-        db.add(Subscription(user_id=user.id, strategy_id=sid, is_active=True))
+        await SubscriptionRepository.create_or_renew_subscription(
+            db=db,
+            user_id=user.id,
+            strategy_id=sid,
+            plan_tier="FREE",
+            amount_paid_paise=0,
+            duration_days=30,
+        )
         manager.subscribe(user.id, sid)
         if user.api_ucc:
             manager.subscribe(user.api_ucc, sid)
@@ -205,23 +243,14 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)) -> 
     return AuthResponse(
         access_token=token,
         token_type="bearer",
-        user=UserResponse(
-            id=user.id,
-            name=user.name,
-            email=user.email,
-            role=user.role,
-            api_ucc=user.api_ucc,
-            notifications_enabled=user.notifications_enabled,
-            theme=user.theme,
-        ),
+        user=make_user_response(user),
     )
 
 
 @router.post("/auth/login", response_model=AuthResponse)
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
     """Authenticate credentials, restore subscriptions in database, and issue JWT bearer token."""
-    res = await db.execute(select(User).where(User.email == req.email))
-    user = res.scalar_one_or_none()
+    user = await UserRepository.get_by_email(db, req.email)
 
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(
@@ -267,23 +296,16 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)) -> AuthRe
         await db.commit()
     else:
         for s in subs:
-            manager.subscribe(user.id, s.strategy_id)
-            if user.api_ucc:
-                manager.subscribe(user.api_ucc, s.strategy_id)
+            if s.strategy_id:
+                manager.subscribe(user.id, s.strategy_id)
+                if user.api_ucc:
+                    manager.subscribe(user.api_ucc, s.strategy_id)
 
     token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
     return AuthResponse(
         access_token=token,
         token_type="bearer",
-        user=UserResponse(
-            id=user.id,
-            name=user.name,
-            email=user.email,
-            role=user.role,
-            api_ucc=user.api_ucc,
-            notifications_enabled=user.notifications_enabled,
-            theme=user.theme,
-        ),
+        user=make_user_response(user),
     )
 
 
@@ -307,8 +329,12 @@ async def get_user_subscriptions(
             "strategyName": strat.name,
             "symbol": strat.symbol,
             "timeframe": strat.timeframe,
+            "planTier": sub.plan_tier,
             "isActive": sub.is_active,
+            "status": sub.status,
+            "amountPaidInr": round(sub.amount_paid_paise / 100, 2),
             "subscribedAt": sub.subscribed_at.isoformat() if sub.subscribed_at else None,
+            "expiresAt": sub.expires_at.isoformat() if sub.expires_at else None,
         })
     return out
 
@@ -320,15 +346,12 @@ async def toggle_subscription(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Toggle a strategy subscription on/off for current user."""
-    res = await db.execute(
-        select(Subscription).where(
-            Subscription.user_id == current_user.id,
-            Subscription.strategy_id == strategy_id,
-        )
+    sub = await SubscriptionRepository.get_active_user_subscription_for_strategy(
+        db, current_user.id, strategy_id
     )
-    sub = res.scalar_one_or_none()
     if sub:
         sub.is_active = not sub.is_active
+        sub.status = "ACTIVE" if sub.is_active else "PAUSED"
         if sub.is_active:
             manager.subscribe(current_user.id, strategy_id)
             if current_user.api_ucc:
@@ -341,8 +364,13 @@ async def toggle_subscription(
         return {"strategyId": strategy_id, "isActive": sub.is_active}
     else:
         # Create new subscription
-        new_sub = Subscription(user_id=current_user.id, strategy_id=strategy_id, is_active=True)
-        db.add(new_sub)
+        new_sub = await SubscriptionRepository.create_or_renew_subscription(
+            db=db,
+            user_id=current_user.id,
+            strategy_id=strategy_id,
+            plan_tier="FREE",
+            amount_paid_paise=0,
+        )
         manager.subscribe(current_user.id, strategy_id)
         if current_user.api_ucc:
             manager.subscribe(current_user.api_ucc, strategy_id)
@@ -359,15 +387,8 @@ async def logout() -> dict[str, Any]:
 @router.get("/auth/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)) -> UserResponse:
     """Return currently authenticated user profile."""
-    return UserResponse(
-        id=current_user.id,
-        name=current_user.name,
-        email=current_user.email,
-        role=current_user.role,
-        api_ucc=current_user.api_ucc,
-        notifications_enabled=current_user.notifications_enabled,
-        theme=current_user.theme,
-    )
+    return make_user_response(current_user)
+
 
 
 @router.post("/auth/forgot-password")
@@ -445,15 +466,7 @@ async def change_password(
 @router.get("/user/settings", response_model=UserResponse)
 async def get_user_settings(current_user: User = Depends(get_current_user)) -> UserResponse:
     """Retrieve durable preferences and user settings."""
-    return UserResponse(
-        id=current_user.id,
-        name=current_user.name,
-        email=current_user.email,
-        role=current_user.role,
-        api_ucc=current_user.api_ucc,
-        notifications_enabled=current_user.notifications_enabled,
-        theme=current_user.theme,
-    )
+    return make_user_response(current_user)
 
 
 @router.put("/user/settings", response_model=UserResponse)
@@ -466,8 +479,8 @@ async def update_user_settings(
     if req.name is not None:
         current_user.name = req.name
     if req.email is not None and req.email != current_user.email:
-        res = await db.execute(select(User).where(User.email == req.email))
-        if res.scalar_one_or_none():
+        existing = await UserRepository.get_by_email(db, req.email)
+        if existing:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email is already used by another account",
@@ -480,15 +493,375 @@ async def update_user_settings(
 
     await db.commit()
     await db.refresh(current_user)
-    return UserResponse(
-        id=current_user.id,
-        name=current_user.name,
-        email=current_user.email,
-        role=current_user.role,
-        api_ucc=current_user.api_ucc,
-        notifications_enabled=current_user.notifications_enabled,
-        theme=current_user.theme,
+    return make_user_response(current_user)
+
+
+# ============================================================================
+# User Management & Administration Endpoints (Create User, List, Update, Delete)
+# ============================================================================
+
+@router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    req: CreateUserRequest,
+    current_user: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    """Admin endpoint to create a new platform user with initial balance, role, and subscription tier."""
+    existing = await UserRepository.get_by_email(db, req.email)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email address already exists",
+        )
+
+    paise_balance = int(round(req.initial_balance_inr * 100))
+    user = await UserRepository.create_user(
+        db=db,
+        name=req.name,
+        email=req.email,
+        password=req.password,
+        role=req.role,
+        api_ucc=req.api_ucc or "HACK342",
+        account_balance_paise=paise_balance,
+        subscription_tier=req.subscription_tier,
     )
+    await db.commit()
+    await db.refresh(user)
+    return make_user_response(user)
+
+
+@router.get("/users", response_model=UserListResponse)
+async def list_users(
+    skip: int = 0,
+    limit: int = 50,
+    search: Optional[str] = None,
+    role: Optional[str] = None,
+    current_user: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> UserListResponse:
+    """List platform users with pagination, text search, and role filtering."""
+    users, total = await UserRepository.list_users(db, skip=skip, limit=limit, search=search, role=role)
+    return UserListResponse(
+        users=[make_user_response(u) for u in users],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.get("/users/{user_id}", response_model=UserResponse)
+async def get_user_by_id(
+    user_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    """Retrieve user details by ID (Admin or Self access)."""
+    if current_user.role != "admin" and current_user.id != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    user = await UserRepository.get_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User account not found")
+    return make_user_response(user)
+
+
+@router.put("/users/{user_id}", response_model=UserResponse)
+async def update_user_by_id(
+    user_id: str,
+    req: UpdateUserAdminRequest,
+    current_user: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    """Admin endpoint to update user profile, role, balance, subscription tier, and status."""
+    user = await UserRepository.get_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User account not found")
+
+    updates: dict[str, Any] = {}
+    if req.name is not None:
+        updates["name"] = req.name
+    if req.email is not None and req.email != user.email:
+        existing = await UserRepository.get_by_email(db, req.email)
+        if existing:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is already used by another user")
+        updates["email"] = req.email
+    if req.role is not None:
+        updates["role"] = req.role
+    if req.api_ucc is not None:
+        updates["api_ucc"] = req.api_ucc
+    if req.account_balance_inr is not None:
+        updates["account_balance_paise"] = int(round(req.account_balance_inr * 100))
+    if req.subscription_tier is not None:
+        updates["subscription_tier"] = req.subscription_tier
+    if req.is_active is not None:
+        updates["is_active"] = req.is_active
+
+    updated_user = await UserRepository.update_user(db, user, updates)
+    await db.commit()
+    await db.refresh(updated_user)
+    return make_user_response(updated_user)
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: str,
+    current_user: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Admin endpoint to deactivate a user account."""
+    user = await UserRepository.get_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User account not found")
+    await UserRepository.deactivate_user(db, user)
+    await db.commit()
+    return {"status": "SUCCESS", "message": f"User {user_id} account deactivated successfully"}
+
+
+# ============================================================================
+# Subscription Catalog, Checkout ("Buy Subscription"), & Payments
+# ============================================================================
+
+@router.get("/subscriptions/plans", response_model=list[SubscriptionPlanResponse])
+async def get_subscription_plans(db: AsyncSession = Depends(get_db)) -> list[SubscriptionPlanResponse]:
+    """Retrieve platform subscription plans catalog from database."""
+    plans = await SubscriptionRepository.get_plans(db)
+    if not plans:
+        plans = await SubscriptionRepository.seed_plans(db)
+        await db.commit()
+    out = []
+    import json
+    for p in plans:
+        try:
+            feats = json.loads(p.features_json)
+        except Exception:
+            feats = []
+        out.append(
+            SubscriptionPlanResponse(
+                id=p.id,
+                name=p.name,
+                code=p.code,
+                description=p.description,
+                price_inr=round(p.price_paise / 100, 2),
+                price_paise=p.price_paise,
+                billing_cycle=p.billing_cycle,
+                features=feats,
+            )
+        )
+    return out
+
+
+@router.post("/subscriptions/buy", response_model=BuySubscriptionResponse)
+async def buy_subscription(
+    req: BuySubscriptionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> BuySubscriptionResponse:
+    """Buy subscription or strategy pass with balance validation, transaction ledger entry, and expiration set."""
+    cost_paise = 0
+    plan_tier = "PRO"
+    strategy_obj = None
+    plan_obj = None
+
+    if req.plan_code:
+        plan_obj = await SubscriptionRepository.get_plan_by_code_or_id(db, req.plan_code)
+        if not plan_obj:
+            raise HTTPException(status_code=404, detail=f"Subscription plan '{req.plan_code}' not found")
+        cost_paise = plan_obj.price_paise
+        plan_tier = plan_obj.code
+    elif req.strategy_id:
+        strategy_obj = manager.get_strategy(req.strategy_id)
+        s_rec = await StrategyRepository.get_by_id(db, req.strategy_id)
+        if not strategy_obj and not s_rec:
+            raise HTTPException(status_code=404, detail=f"Strategy '{req.strategy_id}' not found")
+        cost_paise = s_rec.price_paise if s_rec else 0
+        plan_tier = "STRATEGY_SUB"
+    else:
+        raise HTTPException(status_code=400, detail="Must specify plan_code or strategy_id to purchase subscription")
+
+    if req.billing_cycle == "annual" and cost_paise > 0:
+        cost_paise = cost_paise * 10
+        duration_days = 365
+    else:
+        duration_days = 30
+
+    if req.payment_method == "WALLET":
+        if (current_user.account_balance_paise or 0) < cost_paise:
+            needed_inr = round(cost_paise / 100, 2)
+            curr_inr = round((current_user.account_balance_paise or 0) / 100, 2)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient wallet balance. Required: ₹{needed_inr:.2f}, Available: ₹{curr_inr:.2f}. Top up your wallet to proceed.",
+            )
+        await UserRepository.update_balance(db, current_user, -cost_paise)
+
+    ref_id = req.payment_reference or f"PAY_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6].upper()}"
+
+    sub = await SubscriptionRepository.create_or_renew_subscription(
+        db=db,
+        user_id=current_user.id,
+        strategy_id=req.strategy_id,
+        plan_id=plan_obj.id if plan_obj else None,
+        plan_tier=plan_tier,
+        amount_paid_paise=cost_paise,
+        duration_days=duration_days,
+        payment_reference=ref_id,
+    )
+
+    item_name = plan_obj.name if plan_obj else (strategy_obj.name if strategy_obj else req.strategy_id)
+    await PaymentRepository.create_transaction(
+        db=db,
+        user_id=current_user.id,
+        subscription_id=sub.id,
+        amount_paise=cost_paise,
+        payment_method=req.payment_method,
+        transaction_type="SUBSCRIPTION_PURCHASE",
+        status="SUCCESS",
+        reference_id=ref_id,
+        remarks=f"Purchased {item_name} ({req.billing_cycle} plan)",
+    )
+
+    if plan_obj and plan_obj.code in ["FREE", "PRO", "ENTERPRISE"]:
+        current_user.subscription_tier = plan_obj.code
+
+    if req.strategy_id:
+        manager.subscribe(current_user.id, req.strategy_id)
+        if current_user.api_ucc:
+            manager.subscribe(current_user.api_ucc, req.strategy_id)
+
+    await db.commit()
+    await db.refresh(current_user)
+
+    return BuySubscriptionResponse(
+        subscription_id=sub.id,
+        status="ACTIVE",
+        plan_tier=plan_tier,
+        strategy_id=req.strategy_id,
+        amount_paid_inr=round(cost_paise / 100, 2),
+        subscribed_at=sub.subscribed_at.isoformat() if sub.subscribed_at else datetime.now(timezone.utc).isoformat(),
+        expires_at=sub.expires_at.isoformat() if sub.expires_at else None,
+        payment_reference=ref_id,
+        remaining_balance_inr=round((current_user.account_balance_paise or 0) / 100, 2),
+        message=f"Subscription successfully activated! Invoice Reference #{ref_id}",
+    )
+
+
+@router.post("/subscriptions/cancel")
+async def cancel_subscription(
+    req: CancelSubscriptionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Cancel an active subscription."""
+    sub = await SubscriptionRepository.cancel_subscription(db, current_user.id, req.subscription_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subscription not found or access denied")
+    if sub.strategy_id:
+        manager.unsubscribe(current_user.id, sub.strategy_id)
+        if current_user.api_ucc:
+            manager.unsubscribe(current_user.api_ucc, sub.strategy_id)
+
+    await ActivityRepository.log_action(
+        db=db,
+        user_id=current_user.id,
+        action_type="CANCEL_SUB",
+        strategy_id=sub.strategy_id,
+        message=f"Cancelled subscription #{req.subscription_id}",
+    )
+    await db.commit()
+    return {"status": "SUCCESS", "message": f"Subscription #{req.subscription_id} cancelled successfully."}
+
+
+@router.get("/subscriptions/transactions", response_model=list[PaymentTransactionResponse])
+async def get_payment_transactions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[PaymentTransactionResponse]:
+    """Get complete payment transaction ledger history for authenticated user."""
+    txns = await PaymentRepository.get_user_transactions(db, current_user.id)
+    return [
+        PaymentTransactionResponse(
+            id=t.id,
+            user_id=t.user_id,
+            amount_inr=round(t.amount_paise / 100, 2),
+            payment_method=t.payment_method,
+            status=t.status,
+            transaction_type=t.transaction_type,
+            reference_id=t.reference_id,
+            remarks=t.remarks,
+            created_at=t.created_at.isoformat() if t.created_at else "",
+        )
+        for t in txns
+    ]
+
+
+@router.post("/user/wallet/topup")
+async def topup_wallet(
+    req: WalletTopUpRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Top up demo account wallet balance with financial transaction logging."""
+    paise_amount = int(round(req.amount_inr * 100))
+    new_bal = await UserRepository.update_balance(db, current_user, paise_amount)
+    ref_id = req.payment_reference or f"TOPUP_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6].upper()}"
+
+    await PaymentRepository.create_transaction(
+        db=db,
+        user_id=current_user.id,
+        amount_paise=paise_amount,
+        payment_method=req.payment_method,
+        transaction_type="WALLET_TOPUP",
+        status="SUCCESS",
+        reference_id=ref_id,
+        remarks=f"Wallet top-up of ₹{req.amount_inr:.2f} via {req.payment_method}",
+    )
+    await ActivityRepository.log_action(
+        db=db,
+        user_id=current_user.id,
+        action_type="WALLET_TOPUP",
+        price_paise=paise_amount,
+        message=f"Wallet top-up of ₹{req.amount_inr:.2f} via {req.payment_method}",
+        details={"ref_id": ref_id, "new_balance_inr": round(new_bal / 100, 2)},
+    )
+    await db.commit()
+    return {
+        "status": "SUCCESS",
+        "message": f"Successfully credited ₹{req.amount_inr:.2f} to wallet.",
+        "new_balance_inr": round(new_bal / 100, 2),
+        "reference_id": ref_id,
+    }
+
+
+@router.get("/user/activities")
+async def get_user_activities(
+    limit: int = 100,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Retrieve complete audit trail of all user actions (trades, subscriptions, settings, top-ups)."""
+    uid = None if current_user.role == "admin" else current_user.id
+    logs = await ActivityRepository.get_user_activities(db, user_id=uid, limit=limit)
+    import json
+    out = []
+    for log in logs:
+        try:
+            dt_map = json.loads(log.details_json)
+        except Exception:
+            dt_map = {}
+        out.append({
+            "id": log.id,
+            "userId": log.user_id,
+            "actionType": log.action_type,
+            "strategyId": log.strategy_id,
+            "symbol": log.symbol,
+            "quantity": log.quantity,
+            "priceInr": round((log.price_paise or 0) / 100, 2),
+            "message": log.message,
+            "details": dt_map,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else "",
+        })
+    return out
+
+
 
 
 # ============================================================================
@@ -510,6 +883,7 @@ class CreateStrategyRequest(BaseModel):
 class ManualTradeRequest(BaseModel):
     side: str = "BUY"
     quantity: Optional[int] = None
+
 
 
 def serialize_strategy(strat: BaseStrategy, current_user: Optional[User], active_subs: set[str]) -> dict[str, Any]:
@@ -649,7 +1023,102 @@ async def update_strategy_parameters(
     return serialize_strategy(strat, current_user, active_subs)
 
 
+@router.post("/strategies")
+async def create_custom_strategy(
+    req: CreateStrategyRequest,
+    current_user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Create a new custom trading strategy with full database persistence and risk engine registration."""
+    strat_id = f"strat_custom_{uuid.uuid4().hex[:8]}"
+    symbol = req.symbol.strip().upper()
+    qty = int(req.parameters.get("quantity", 1))
+
+    if req.strategy_type == "Breakout":
+        strat = BreakoutStrategy(
+            strategy_id=strat_id,
+            name=req.name,
+            symbol=symbol,
+            quantity=qty,
+            target_pct=float(req.parameters.get("target_pct", 0.05)),
+            stop_loss_pct=float(req.parameters.get("sl_pct", 0.05)),
+        )
+
+    elif req.strategy_type == "MovingAverageCross":
+        strat = MovingAverageCrossStrategy(
+            strategy_id=strat_id,
+            name=req.name,
+            symbol=symbol,
+            quantity=qty,
+            fast_period=int(req.parameters.get("fast_period", 5)),
+            slow_period=int(req.parameters.get("slow_period", 20)),
+        )
+    else:
+        strat = TimeBasedStrategy(
+            strategy_id=strat_id,
+            name=req.name,
+            symbol=symbol,
+            quantity=qty,
+        )
+
+    user_id = current_user.id if current_user else "u_1"
+    
+    # Register strategy into live engine
+    manager.register_strategy(strat)
+    manager.subscribe(user_id, strat_id)
+    if current_user and current_user.api_ucc:
+        manager.subscribe(current_user.api_ucc, strat_id)
+    strat.start()
+
+    # Persist in Database
+    await StrategyRepository.upsert_strategy(
+        db=db,
+        strategy_id=strat_id,
+        name=req.name,
+        symbol=symbol,
+        description=req.description or f"Custom {req.strategy_type} strategy on {symbol}",
+        timeframe="1m",
+        status="RUNNING",
+        strategy_type=req.strategy_type,
+        parameters=req.parameters,
+        creator_id=user_id,
+    )
+
+    # Create subscription record
+    await SubscriptionRepository.create_or_renew_subscription(
+        db=db,
+        user_id=user_id,
+        strategy_id=strat_id,
+        plan_tier="FREE",
+        amount_paid_paise=0,
+    )
+    await db.commit()
+
+    active_subs = {strat_id}
+    return serialize_strategy(strat, current_user, active_subs)
+
+
+@router.delete("/strategies/{strategy_id}")
+async def delete_strategy_endpoint(
+    strategy_id: str,
+    current_user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Delete a custom strategy from engine and database."""
+    if not strategy_id.startswith("strat_custom_"):
+        raise HTTPException(status_code=400, detail="Default system strategies cannot be deleted")
+
+    manager.unregister_strategy(strategy_id)
+    deleted = await StrategyRepository.delete_strategy(db, strategy_id)
+    await db.commit()
+
+    return {"status": "DELETED", "message": f"Strategy {strategy_id} deleted successfully", "deleted": deleted}
+
+
+
+
 @router.post("/strategies/{strategy_id}/square-off")
+
 async def square_off_strategy(
     strategy_id: str,
     current_user: Optional[User] = Depends(get_optional_user),

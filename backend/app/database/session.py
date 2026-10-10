@@ -104,23 +104,45 @@ async def init_db() -> None:
             await conn.run_sync(Base.metadata.create_all)
             print("[DATABASE] Local SQLite schema created successfully.")
 
-    # Try applying safe migrations if on PostgreSQL
-    if "postgres" in str(engine.url):
-        try:
-            async with engine.begin() as conn:
-                migration_statements = [
-                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(256) DEFAULT '' NOT NULL;",
-                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(32) DEFAULT 'user' NOT NULL;",
-                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE NOT NULL;",
-                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT TRUE NOT NULL;",
-                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS theme VARCHAR(16) DEFAULT 'light' NOT NULL;",
-                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_hash VARCHAR(128);",
-                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMP WITH TIME ZONE;",
-                ]
-                for stmt in migration_statements:
-                    try:
-                        await conn.execute(text(stmt))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    # Apply idempotent table migrations for SQLite & Postgres
+    async with engine.begin() as conn:
+        migration_statements = [
+            # User table migrations
+            "ALTER TABLE users ADD COLUMN password_hash VARCHAR(256) DEFAULT '';",
+            "ALTER TABLE users ADD COLUMN role VARCHAR(32) DEFAULT 'user';",
+            "ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE;",
+            "ALTER TABLE users ADD COLUMN account_balance_paise BIGINT DEFAULT 10000000;",
+            "ALTER TABLE users ADD COLUMN subscription_tier VARCHAR(32) DEFAULT 'FREE';",
+            "ALTER TABLE users ADD COLUMN notifications_enabled BOOLEAN DEFAULT TRUE;",
+            "ALTER TABLE users ADD COLUMN theme VARCHAR(16) DEFAULT 'light';",
+            "ALTER TABLE users ADD COLUMN reset_token_hash VARCHAR(128);",
+            "ALTER TABLE users ADD COLUMN reset_token_expires_at TIMESTAMP WITH TIME ZONE;",
+            "ALTER TABLE users ADD COLUMN updated_at TIMESTAMP WITH TIME ZONE;",
+
+            # Subscriptions table migrations
+            "ALTER TABLE subscriptions ADD COLUMN plan_id VARCHAR(64);",
+            "ALTER TABLE subscriptions ADD COLUMN plan_tier VARCHAR(32) DEFAULT 'PRO';",
+            "ALTER TABLE subscriptions ADD COLUMN amount_paid_paise BIGINT DEFAULT 0;",
+            "ALTER TABLE subscriptions ADD COLUMN status VARCHAR(32) DEFAULT 'ACTIVE';",
+            "ALTER TABLE subscriptions ADD COLUMN expires_at TIMESTAMP WITH TIME ZONE;",
+            "ALTER TABLE subscriptions ADD COLUMN auto_renew BOOLEAN DEFAULT TRUE;",
+            "ALTER TABLE subscriptions ADD COLUMN payment_reference VARCHAR(128);",
+
+            # Strategies table migrations
+            "ALTER TABLE strategies ADD COLUMN creator_id VARCHAR(64);",
+            "ALTER TABLE strategies ADD COLUMN strategy_type VARCHAR(64) DEFAULT 'TimeBased';",
+            "ALTER TABLE strategies ADD COLUMN parameters_json TEXT DEFAULT '{}';",
+            "ALTER TABLE strategies ADD COLUMN is_public BOOLEAN DEFAULT TRUE;",
+            "ALTER TABLE strategies ADD COLUMN price_paise BIGINT DEFAULT 0;",
+
+            # Orders & Trade Fills & Risk Events user_id migrations
+            "ALTER TABLE orders ADD COLUMN user_id VARCHAR(64);",
+            "ALTER TABLE trade_fills ADD COLUMN user_id VARCHAR(64);",
+            "ALTER TABLE risk_events ADD COLUMN user_id VARCHAR(64);",
+        ]
+        for stmt in migration_statements:
+            try:
+                await conn.execute(text(stmt))
+            except Exception:
+                # Column already exists or table alter ignored
+                pass

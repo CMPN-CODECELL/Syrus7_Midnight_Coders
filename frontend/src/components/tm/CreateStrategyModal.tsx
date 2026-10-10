@@ -8,7 +8,34 @@ interface CreateStrategyModalProps {
   onClose: () => void;
 }
 
-const POPULAR_SYMBOLS = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "TATAMOTORS", "ICICIBANK", "SBIN"];
+const POPULAR_SYMBOLS = [
+  "RELIANCE",
+  "TCS",
+  "INFY",
+  "HDFCBANK",
+  "ICICIBANK",
+  "TATAMOTORS",
+  "SBIN",
+  "BHARTIARTL",
+  "ITC",
+  "KOTAKBANK",
+  "LT",
+  "AXISBANK",
+  "WIPRO",
+  "HCLTECH",
+  "ASIANPAINT",
+  "TITAN",
+  "MARUTI",
+  "SUNPHARMA",
+  "BAJFINANCE",
+  "ZOMATO",
+  "PAYTM",
+  "JIOFIN",
+  "TATASTEEL",
+  "NIFTY50",
+  "BANKNIFTY",
+  "FINNIFTY",
+];
 
 export function CreateStrategyModal({ open, onClose }: CreateStrategyModalProps) {
   const m = useCreateStrategy();

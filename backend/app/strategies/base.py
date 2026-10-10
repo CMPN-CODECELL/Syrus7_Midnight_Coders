@@ -67,6 +67,8 @@ class BaseStrategy(ABC):
         """Dynamically update strategy parameters at runtime."""
         if "symbols" in params and isinstance(params["symbols"], list):
             self.symbols = [s.upper() for s in params["symbols"]]
+        elif "symbol" in params and isinstance(params["symbol"], str) and params["symbol"].strip():
+            self.symbols = [params["symbol"].strip().upper()]
 
     def square_off_intent(self, ltp_paise: int | None = None) -> list[OrderIntent]:
         """Generate market order intents to flatten open positions for this strategy."""

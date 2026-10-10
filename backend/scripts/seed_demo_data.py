@@ -18,6 +18,13 @@ from app.database.models import (
     TradeFillRecord,
     User,
 )
+from app.database.repositories import (
+    OrderRepository,
+    PaymentRepository,
+    StrategyRepository,
+    SubscriptionRepository,
+    UserRepository,
+)
 
 
 async def seed_demo_data():
@@ -29,6 +36,10 @@ async def seed_demo_data():
     await init_db()
 
     async with AsyncSessionLocal() as session:
+        # 0. Seed Default Subscription Plans
+        plans = await SubscriptionRepository.seed_plans(session)
+        print(f"[PLANS] Seeded {len(plans)} subscription tier catalog options.")
+
         # 1. Seed Demo Users
         users_data = [
             {
@@ -38,6 +49,8 @@ async def seed_demo_data():
                 "password": "demo1234",
                 "role": "admin",
                 "ucc": "HACK342",
+                "tier": "ENTERPRISE",
+                "balance": 25000000,  # ₹250,000.00
             },
             {
                 "id": "u_judge",
@@ -46,6 +59,8 @@ async def seed_demo_data():
                 "password": "judge1234",
                 "role": "admin",
                 "ucc": "HACK342",
+                "tier": "PRO",
+                "balance": 50000000,  # ₹500,000.00
             },
             {
                 "id": "u_priya",
@@ -54,6 +69,8 @@ async def seed_demo_data():
                 "password": "priya1234",
                 "role": "user",
                 "ucc": "HACK342",
+                "tier": "PRO",
+                "balance": 10000000,  # ₹100,000.00
             },
             {
                 "id": "u_arjun",
@@ -62,6 +79,8 @@ async def seed_demo_data():
                 "password": "arjun1234",
                 "role": "user",
                 "ucc": "HACK342",
+                "tier": "FREE",
+                "balance": 5000000,  # ₹50,000.00
             },
             {
                 "id": "u_karthik",
@@ -70,12 +89,17 @@ async def seed_demo_data():
                 "password": "karthik1234",
                 "role": "user",
                 "ucc": "HACK342",
+                "tier": "PRO",
+                "balance": 15000000,  # ₹150,000.00
             },
         ]
 
         created_users = []
         for u_info in users_data:
-            user = await session.get(User, u_info["id"])
+            res = await session.execute(
+                select(User).where((User.id == u_info["id"]) | (User.email == u_info["email"]))
+            )
+            user = res.scalar_one_or_none()
             if not user:
                 user = User(
                     id=u_info["id"],
@@ -85,6 +109,8 @@ async def seed_demo_data():
                     role=u_info["role"],
                     is_active=True,
                     api_ucc=u_info["ucc"],
+                    subscription_tier=u_info["tier"],
+                    account_balance_paise=u_info["balance"],
                     notifications_enabled=True,
                     theme="light",
                 )
@@ -94,9 +120,12 @@ async def seed_demo_data():
                 user.email = u_info["email"]
                 user.password_hash = hash_password(u_info["password"])
                 user.is_active = True
-            created_users.append(u_info["id"])
+                user.subscription_tier = u_info["tier"]
+                user.account_balance_paise = u_info["balance"]
+            created_users.append(user.id if user else u_info["id"])
 
         await session.commit()
+
         print(f"[USERS] Seeded {len(users_data)} judge-ready user accounts.")
 
         # 2. Seed Strategies
@@ -108,6 +137,8 @@ async def seed_demo_data():
                 "symbol": "RELIANCE",
                 "timeframe": "1m",
                 "status": "RUNNING",
+                "type": "TimeBased",
+                "price": 0,
             },
             {
                 "id": "strat_breakout",
@@ -116,6 +147,8 @@ async def seed_demo_data():
                 "symbol": "INFY",
                 "timeframe": "1m",
                 "status": "RUNNING",
+                "type": "Breakout",
+                "price": 49900,  # ₹499/mo premium
             },
             {
                 "id": "strat_ma",
@@ -124,6 +157,8 @@ async def seed_demo_data():
                 "symbol": "TCS",
                 "timeframe": "1m",
                 "status": "RUNNING",
+                "type": "MovingAverageCross",
+                "price": 99900,  # ₹999/mo premium
             },
             {
                 "id": "strat_vwap",
@@ -132,6 +167,8 @@ async def seed_demo_data():
                 "symbol": "HDFCBANK",
                 "timeframe": "5m",
                 "status": "RUNNING",
+                "type": "TimeBased",
+                "price": 0,
             },
             {
                 "id": "strat_rsi",
@@ -140,50 +177,63 @@ async def seed_demo_data():
                 "symbol": "RELIANCE",
                 "timeframe": "5m",
                 "status": "RUNNING",
+                "type": "Breakout",
+                "price": 149900,  # ₹1,499/mo premium
             },
         ]
 
         for s_info in strats_data:
-            strat = await session.get(StrategyRecord, s_info["id"])
-            if not strat:
-                strat = StrategyRecord(
-                    id=s_info["id"],
-                    name=s_info["name"],
-                    description=s_info["description"],
-                    symbol=s_info["symbol"],
-                    timeframe=s_info["timeframe"],
-                    status=s_info["status"],
-                )
-                session.add(strat)
+            await StrategyRepository.upsert_strategy(
+                db=session,
+                strategy_id=s_info["id"],
+                name=s_info["name"],
+                symbol=s_info["symbol"],
+                description=s_info["description"],
+                timeframe=s_info["timeframe"],
+                status=s_info["status"],
+                strategy_type=s_info["type"],
+                price_paise=s_info["price"],
+            )
 
         await session.commit()
         print(f"[STRATEGIES] Seeded {len(strats_data)} active trading strategies.")
 
-        # 3. Seed Subscriptions for all users across all strategies
+        # 3. Seed Subscriptions & Payment Records
         sub_count = 0
+        now = datetime.now(timezone.utc)
         for uid in created_users:
             for s_info in strats_data:
-                res = await session.execute(
-                    select(Subscription).where(
-                        Subscription.user_id == uid,
-                        Subscription.strategy_id == s_info["id"],
-                    )
+                existing = await SubscriptionRepository.get_active_user_subscription_for_strategy(
+                    session, uid, s_info["id"]
                 )
-                if not res.scalar_one_or_none():
-                    session.add(
-                        Subscription(
-                            user_id=uid,
-                            strategy_id=s_info["id"],
-                            is_active=True,
-                        )
+                if not existing:
+                    sub = await SubscriptionRepository.create_or_renew_subscription(
+                        db=session,
+                        user_id=uid,
+                        strategy_id=s_info["id"],
+                        plan_tier="PRO" if uid in ["u_1", "u_judge"] else "FREE",
+                        amount_paid_paise=s_info["price"],
+                        duration_days=30,
+                        payment_reference=f"REF_SEED_{uid}_{s_info['id']}",
                     )
                     sub_count += 1
 
+                    if s_info["price"] > 0:
+                        await PaymentRepository.create_transaction(
+                            db=session,
+                            user_id=uid,
+                            subscription_id=sub.id,
+                            amount_paise=s_info["price"],
+                            payment_method="WALLET",
+                            transaction_type="SUBSCRIPTION_PURCHASE",
+                            status="SUCCESS",
+                            remarks=f"Subscription purchase for {s_info['name']}",
+                        )
+
         await session.commit()
-        print(f"[SUBSCRIPTIONS] Created {sub_count} user-strategy subscriptions.")
+        print(f"[SUBSCRIPTIONS] Created {sub_count} user-strategy subscriptions and payment ledgers.")
 
         # 4. Seed Historical Orders and Fills for Judge Dashboard
-        now = datetime.now(timezone.utc)
         orders_data = [
             {
                 "id": "ord_001",
@@ -261,38 +311,32 @@ async def seed_demo_data():
 
         for o_info in orders_data:
             ord_rec = await session.get(OrderRecord, o_info["id"])
-            ord_dt = now - timedelta(minutes=o_info["time_offset_min"])
             if not ord_rec:
-                ord_rec = OrderRecord(
-                    id=o_info["id"],
+                await OrderRepository.save_order(
+                    db=session,
+                    order_id=o_info["id"],
                     client_order_id=o_info["client_order_id"],
                     strategy_id=o_info["strategy_id"],
                     symbol=o_info["symbol"],
-                    exchange="NSE",
                     side=o_info["side"],
                     quantity=o_info["quantity"],
                     filled_quantity=o_info["filled_quantity"],
                     price_paise=o_info["price_paise"],
-                    product="INTRADAY",
                     status=o_info["status"],
-                    created_at=ord_dt,
+                    user_id="u_1",
                 )
-                session.add(ord_rec)
 
-                # Add trade fill if order was filled
                 if o_info["filled_quantity"] > 0:
-                    fill = TradeFillRecord(
+                    await OrderRepository.save_fill(
+                        db=session,
                         order_id=o_info["id"],
                         strategy_id=o_info["strategy_id"],
                         symbol=o_info["symbol"],
                         side=o_info["side"],
                         quantity=o_info["filled_quantity"],
                         price_paise=o_info["price_paise"],
-                        brokerage_paise=2000,
-                        fee_paise=150,
-                        timestamp=ord_dt + timedelta(seconds=2),
+                        user_id="u_1",
                     )
-                    session.add(fill)
 
         await session.commit()
         print(f"[ORDERS & FILLS] Seeded realistic executed orders and P&L trade fills.")
@@ -309,7 +353,6 @@ async def seed_demo_data():
                 "reason": "PASS_ALL_CHECKS",
                 "message": "Passed tick size, lot size, circuit limit, and max loss checks.",
                 "severity": "INFO",
-                "time_offset_min": 90,
             },
             {
                 "strategy_id": "strat_ma",
@@ -321,7 +364,6 @@ async def seed_demo_data():
                 "reason": "PASS_ALL_CHECKS",
                 "message": "Order intent validated against 021 exchange controls.",
                 "severity": "INFO",
-                "time_offset_min": 60,
             },
             {
                 "strategy_id": "strat_breakout",
@@ -333,7 +375,6 @@ async def seed_demo_data():
                 "reason": "TICK_SIZE_INVALID",
                 "message": "Price Rs. 991.54 is not a valid multiple of tick size Rs. 0.05.",
                 "severity": "WARNING",
-                "time_offset_min": 30,
             },
             {
                 "strategy_id": "ALL",
@@ -345,25 +386,23 @@ async def seed_demo_data():
                 "reason": "KILL_SWITCH_ACTIVE",
                 "message": "Level 3 Emergency Kill Switch activated by operator. SLA met in 3.08s.",
                 "severity": "CRITICAL",
-                "time_offset_min": 10,
             },
         ]
 
         for re_info in risk_events_data:
-            re_dt = now - timedelta(minutes=re_info["time_offset_min"])
-            re_rec = RiskEventRecord(
+            await OrderRepository.save_risk_event(
+                db=session,
                 strategy_id=re_info["strategy_id"],
                 symbol=re_info["symbol"],
                 side=re_info["side"],
                 quantity=re_info["quantity"],
-                price_paise=re_info["price_paise"],
                 passed=re_info["passed"],
+                price_paise=re_info["price_paise"],
                 reason=re_info["reason"],
                 message=re_info["message"],
                 severity=re_info["severity"],
-                timestamp=re_dt,
+                user_id="u_1",
             )
-            session.add(re_rec)
 
         await session.commit()
         print(f"[RISK EVENTS] Seeded Level 3 Risk Controls audit logs for presentation.")

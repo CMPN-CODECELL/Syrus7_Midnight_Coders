@@ -589,6 +589,84 @@ export const riskService = {
   },
 };
 
+export const subscriptionService = {
+  async getPlans(): Promise<any[]> {
+    const res = await fetchApi<any[]>("/subscriptions/plans");
+    return res || [];
+  },
+  async buySubscription(payload: {
+    plan_code?: string;
+    strategy_id?: string;
+    billing_cycle?: string;
+    payment_method?: string;
+  }): Promise<any> {
+    return await fetchApi("/subscriptions/buy", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      throwOnError: true,
+    });
+  },
+  async cancelSubscription(subscriptionId: number): Promise<any> {
+    return await fetchApi("/subscriptions/cancel", {
+      method: "POST",
+      body: JSON.stringify({ subscription_id: subscriptionId }),
+      throwOnError: true,
+    });
+  },
+  async getTransactions(): Promise<any[]> {
+    const res = await fetchApi<any[]>("/subscriptions/transactions");
+    return res || [];
+  },
+  async topupWallet(amountInr: number, paymentMethod = "UPI"): Promise<any> {
+    return await fetchApi("/user/wallet/topup", {
+      method: "POST",
+      body: JSON.stringify({ amount_inr: amountInr, payment_method: paymentMethod }),
+      throwOnError: true,
+    });
+  },
+};
+
+export const userService = {
+  async getUsers(search?: string, role?: string): Promise<any> {
+    let url = "/users";
+    const q: string[] = [];
+    if (search) q.push(`search=${encodeURIComponent(search)}`);
+    if (role) q.push(`role=${encodeURIComponent(role)}`);
+    if (q.length > 0) url += `?${q.join("&")}`;
+    const res = await fetchApi<any>(url);
+    return res || { users: [], total: 0 };
+  },
+  async createUser(payload: {
+    name: string;
+    email: string;
+    password: string;
+    role?: string;
+    initial_balance_inr?: number;
+    subscription_tier?: string;
+  }): Promise<User> {
+    const res = await fetchApi<User>("/users", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      throwOnError: true,
+    });
+    return res!;
+  },
+  async updateUser(userId: string, payload: Record<string, any>): Promise<User> {
+    const res = await fetchApi<User>(`/users/${userId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      throwOnError: true,
+    });
+    return res!;
+  },
+  async deleteUser(userId: string): Promise<any> {
+    return await fetchApi(`/users/${userId}`, {
+      method: "DELETE",
+      throwOnError: true,
+    });
+  },
+};
+
 export const api = {
   ...authService,
   ...connectionService,
@@ -598,6 +676,9 @@ export const api = {
   ...orderService,
   ...positionService,
   ...riskService,
+  ...subscriptionService,
+  ...userService,
 };
+
 
 

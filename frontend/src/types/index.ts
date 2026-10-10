@@ -15,9 +15,14 @@ export interface User {
   email: string;
   role?: string;
   api_ucc?: string;
+  account_balance_paise?: number;
+  account_balance_inr?: number;
+  subscription_tier?: string;
   notifications_enabled?: boolean;
   theme?: "light" | "dark";
+  created_at?: string;
 }
+
 
 export interface Account {
   accountValue: number;

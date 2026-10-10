@@ -185,6 +185,27 @@ class CandleAggregator:
             if self.on_candle_closed:
                 self.on_candle_closed(current)
 
+            # Fill empty minute gaps with zero-volume carry-forward candles
+            step = timedelta(minutes=self.timeframe_minutes)
+            gap_time = current.start_time + step
+            last_close = current.close_paise
+            while gap_time < candle_start:
+                gap_candle = Candle(
+                    symbol=symbol,
+                    timeframe=self.timeframe,
+                    open_paise=last_close,
+                    high_paise=last_close,
+                    low_paise=last_close,
+                    close_paise=last_close,
+                    volume=0,
+                    start_time=gap_time,
+                    is_closed=True,
+                )
+                self._history[symbol].append(gap_candle)
+                if self.on_candle_closed:
+                    self.on_candle_closed(gap_candle)
+                gap_time += step
+
             # Reset current
             current = None
 

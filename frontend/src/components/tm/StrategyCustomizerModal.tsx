@@ -11,9 +11,42 @@ interface StrategyCustomizerModalProps {
   strategy: Strategy;
 }
 
+const STOCK_SYMBOLS = [
+  "RELIANCE",
+  "TCS",
+  "INFY",
+  "HDFCBANK",
+  "ICICIBANK",
+  "TATAMOTORS",
+  "SBIN",
+  "BHARTIARTL",
+  "ITC",
+  "KOTAKBANK",
+  "LT",
+  "AXISBANK",
+  "WIPRO",
+  "HCLTECH",
+  "ASIANPAINT",
+  "TITAN",
+  "MARUTI",
+  "SUNPHARMA",
+  "BAJFINANCE",
+  "ZOMATO",
+  "PAYTM",
+  "JIOFIN",
+  "TATASTEEL",
+  "NIFTY50",
+  "BANKNIFTY",
+  "FINNIFTY",
+];
+
 export function StrategyCustomizerModal({ open, onClose, strategy }: StrategyCustomizerModalProps) {
   const m = useUpdateStrategyParameters();
   const [successMsg, setSuccessMsg] = useState(false);
+
+  // Symbol Selection State
+  const [symbol, setSymbol] = useState(strategy.symbol || "RELIANCE");
+  const [customSymbol, setCustomSymbol] = useState("");
 
   // General & Risk Limits
   const [quantity, setQuantity] = useState(strategy.positionQty || 1);
@@ -50,6 +83,8 @@ export function StrategyCustomizerModal({ open, onClose, strategy }: StrategyCus
   useEffect(() => {
     if (!open) return;
     const p: any = strategy.parameters || {};
+    setSymbol(strategy.symbol || "RELIANCE");
+    setCustomSymbol("");
     setQuantity(p.quantity || 1);
     setMaxDailyLoss(strategy.limits.maxDailyLoss || 500);
     setMaxPositionSize(strategy.limits.maxPositionSize || 10);
@@ -68,9 +103,12 @@ export function StrategyCustomizerModal({ open, onClose, strategy }: StrategyCus
     setSuccessMsg(false);
   }, [open, strategy]);
 
+  const selectedSymbol = customSymbol.trim() ? customSymbol.trim().toUpperCase() : symbol;
+
   const handleSave = async () => {
     const newParams: any = {
       quantity: Number(quantity),
+      symbol: selectedSymbol,
     };
 
     if (isMa) {
@@ -123,11 +161,11 @@ export function StrategyCustomizerModal({ open, onClose, strategy }: StrategyCus
       title={`Customize Strategy: ${strategy.name}`}
     >
       <div className="space-y-5 text-sm">
-        {/* Trade Sizing */}
+        {/* Trade Sizing & Stock Symbol */}
         <div className="rounded-lg border bg-card p-4">
           <div className="flex items-center gap-2 font-semibold">
             <Zap className="h-4 w-4 text-primary" />
-            <span>Order Sizing</span>
+            <span>Order Sizing & Stock Symbol</span>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-4">
             <div>
@@ -142,9 +180,27 @@ export function StrategyCustomizerModal({ open, onClose, strategy }: StrategyCus
               />
             </div>
             <div>
-              <label className="text-xs text-muted-foreground">Symbol</label>
-              <div className="mt-1 flex h-9 items-center rounded-md border border-input bg-muted/40 px-3 font-semibold">
-                {strategy.symbol}
+              <label className="text-xs text-muted-foreground">Instrument Symbol (Select or Type Any)</label>
+              <div className="mt-1 flex gap-2">
+                <select
+                  value={STOCK_SYMBOLS.includes(symbol) ? symbol : "RELIANCE"}
+                  onChange={(e) => {
+                    setSymbol(e.target.value);
+                    setCustomSymbol("");
+                  }}
+                  className="w-1/2 rounded-md border border-input bg-background px-2 py-1.5 text-xs font-medium"
+                >
+                  {STOCK_SYMBOLS.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  placeholder="Or custom stock"
+                  value={customSymbol}
+                  onChange={(e) => setCustomSymbol(e.target.value.toUpperCase())}
+                  className="w-1/2 rounded-md border border-input bg-background px-2 py-1.5 text-xs font-medium uppercase"
+                />
               </div>
             </div>
           </div>

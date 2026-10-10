@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { Play, Square, Sliders, ShieldAlert, RotateCcw } from "lucide-react";
+import { Play, Square, Sliders, ShieldAlert, RotateCcw, ShoppingCart, XCircle } from "lucide-react";
 import { Badge, Button, Modal } from "./ui";
 import { useKillSwitch, useStrategyAction, useSquareOffStrategy, useResetStrategy } from "@/hooks/queries";
 import type { Strategy } from "@/types";
 import { inr } from "@/lib/format";
 import { StrategyCustomizerModal } from "./StrategyCustomizerModal";
+import { SubscribeModal } from "./SubscribeModal";
+import { CancelSubscriptionModal } from "./CancelSubscriptionModal";
 
 export { StrategyCustomizerModal } from "./StrategyCustomizerModal";
 
@@ -17,10 +19,14 @@ export function StateBadge({ s }: { s: Strategy }) {
 
 export function StrategyActions({ s }: { s: Strategy }) {
   const [openSubscribe, setOpenSubscribe] = useState(false);
+  const [openCancel, setOpenCancel] = useState(false);
   const [openCustomizer, setOpenCustomizer] = useState(false);
   const { data: ks } = useKillSwitch();
   const m = useStrategyAction();
   const blocked = !!ks?.active;
+
+  // Determine real price per strategy
+  const priceInr = s.id === "strat_breakout" ? 499 : s.id === "strat_ma" ? 999 : s.id === "strat_rsi" ? 1499 : 499;
 
   return (
     <>
@@ -35,50 +41,55 @@ export function StrategyActions({ s }: { s: Strategy }) {
       </Button>
 
       {!s.subscribed && (
-        <Button size="sm" disabled={blocked} onClick={() => setOpenSubscribe(true)}>
-          Subscribe
-        </Button>
-      )}
-      {s.subscribed && s.state !== "RUNNING" && (
-        <Button size="sm" disabled={blocked || m.isPending} onClick={() => m.mutate({ id: s.id, action: "start" })}>
-          <Play className="h-3.5 w-3.5" /> Start
-        </Button>
-      )}
-      {s.state === "RUNNING" && (
-        <Button size="sm" variant="outline" disabled={m.isPending} onClick={() => m.mutate({ id: s.id, action: "stop" })}>
-          <Square className="h-3.5 w-3.5" /> Stop
+        <Button size="sm" disabled={blocked} onClick={() => setOpenSubscribe(true)} className="gap-1">
+          <ShoppingCart className="h-3.5 w-3.5" />
+          Subscribe (₹{priceInr})
         </Button>
       )}
 
-      {/* Subscribe Confirmation Modal */}
-      <Modal open={openSubscribe} onClose={() => setOpenSubscribe(false)} title={`Subscribe to ${s.name}`}>
-        <dl className="space-y-3 text-sm">
-          <Row k="Symbol" v={s.symbol} />
-          <Row k="Candle timeframe" v={s.timeframe} />
-          <div className="rounded-lg border bg-muted/40 p-3">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Risk limits (enforced by platform)
-            </p>
-            <Row k="Maximum daily loss" v={inr(s.limits.maxDailyLoss)} />
-            <Row k="Maximum position size" v={String(s.limits.maxPositionSize)} />
-            <Row k="Maximum orders / minute" v={String(s.limits.maxOrdersPerMinute)} />
-          </div>
-        </dl>
-        <p className="mt-4 text-xs text-muted-foreground">
-          Past performance does not guarantee future results. Every order is checked by the risk engine before it is sent.
-        </p>
-        <div className="mt-5 flex justify-end gap-2">
-          <Button variant="outline" onClick={() => setOpenSubscribe(false)}>
-            Cancel
-          </Button>
+      {s.subscribed && (
+        <div className="flex items-center gap-1.5">
+          {s.state !== "RUNNING" ? (
+            <Button size="sm" disabled={blocked || m.isPending} onClick={() => m.mutate({ id: s.id, action: "start" })}>
+              <Play className="h-3.5 w-3.5 mr-1" /> Start
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" disabled={m.isPending} onClick={() => m.mutate({ id: s.id, action: "stop" })}>
+              <Square className="h-3.5 w-3.5 mr-1" /> Stop
+            </Button>
+          )}
+
           <Button
-            disabled={m.isPending}
-            onClick={() => m.mutate({ id: s.id, action: "subscribe" }, { onSuccess: () => setOpenSubscribe(false) })}
+            size="sm"
+            variant="ghost"
+            onClick={() => setOpenCancel(true)}
+            className="text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive h-8 px-2.5"
+            title="Unsubscribe from strategy"
           >
-            Subscribe
+            <XCircle className="h-3.5 w-3.5 mr-1" />
+            Unsubscribe
           </Button>
         </div>
-      </Modal>
+      )}
+
+      {/* Subscribe Confirmation & Checkout Modal */}
+      <SubscribeModal
+        open={openSubscribe}
+        onClose={() => setOpenSubscribe(false)}
+        strategyId={s.id}
+        strategyName={s.name}
+        symbol={s.symbol}
+        priceInr={priceInr}
+      />
+
+      {/* Cancellation Confirmation Modal */}
+      <CancelSubscriptionModal
+        open={openCancel}
+        onClose={() => setOpenCancel(false)}
+        strategyId={s.id}
+        strategyName={s.name}
+        symbol={s.symbol}
+      />
 
       {/* Full Customizer Modal */}
       <StrategyCustomizerModal

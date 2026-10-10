@@ -1,6 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { Activity } from "lucide-react";
 import { Badge, Button, Card, CardHeader, Field, Modal, PageHeader, inputCls } from "@/components/tm/ui";
+import { UserActivityLogModal } from "@/components/tm/UserActivityLogModal";
 import { authService } from "@/services";
 
 export const Route = createFileRoute("/_app/settings")({
@@ -21,6 +23,8 @@ function SettingsPage() {
   const [email, setEmail] = useState("");
   const [notify, setNotify] = useState(true);
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [activityModalOpen, setActivityModalOpen] = useState(false);
+
 
   const [savingAccount, setSavingAccount] = useState(false);
   const [accountMsg, setAccountMsg] = useState("");
@@ -249,10 +253,18 @@ function SettingsPage() {
         </div>
       </Card>
 
-      {/* Security Settings */}
+      {/* Security & Audit Trail */}
       <Card>
-        <CardHeader title="Security" />
-        <div className="flex flex-wrap gap-2 p-5">
+        <CardHeader title="Security & Audit Logs" />
+        <div className="flex flex-wrap items-center gap-3 p-5">
+          <Button
+            variant="outline"
+            onClick={() => setActivityModalOpen(true)}
+            className="inline-flex items-center gap-1.5"
+          >
+            <Activity className="h-4 w-4 text-primary" />
+            View User Action Audit Logs
+          </Button>
           <Button
             variant="outline"
             onClick={() => {
@@ -277,6 +289,13 @@ function SettingsPage() {
           </Button>
         </div>
       </Card>
+
+      {/* User Action Audit Trail Modal */}
+      <UserActivityLogModal
+        open={activityModalOpen}
+        onClose={() => setActivityModalOpen(false)}
+      />
+
 
       {/* Change Password Modal */}
       <Modal open={pwModalOpen} onClose={() => setPwModalOpen(false)} title="Change Password">

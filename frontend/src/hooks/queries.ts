@@ -25,7 +25,7 @@ function useInvalidateAll() {
 export function useStrategyAction() {
   const inv = useInvalidateAll();
   return useMutation({
-    mutationFn: ({ id, action }: { id: string; action: "subscribe" | "start" | "stop" }) => strategyService[action](id),
+    mutationFn: ({ id, action }: { id: string; action: "subscribe" | "unsubscribe" | "start" | "stop" }) => strategyService[action](id),
     onSuccess: inv,
   });
 }
