@@ -29,11 +29,17 @@
    - [Prompt 4.2: Strategy Customization Studio & Parameter Engine](#prompt-42-strategy-customization-studio--parameter-engine)
 6. [Chaos Testing & Judge Failure Verification Prompts](#6-chaos-testing--judge-failure-verification-prompts)
    - [Prompt 5.1: Judge Failure & Chaos Scenario Simulator](#prompt-51-judge-failure--chaos-scenario-simulator)
-   - [Prompt 5.2: Automated Pytest Suite Generation (46 Unit & Integration Tests)](#prompt-52-automated-pytest-suite-generation-46-unit--integration-tests)
+   - [Prompt 5.2: Automated Pytest Suite Generation (80 Unit, Integration & Judge Tests)](#prompt-52-automated-pytest-suite-generation-80-unit-integration--judge-tests)
 7. [Frontend Terminal & User Experience Prompts](#7-frontend-terminal--user-experience-prompts)
    - [Prompt 6.1: Real-Time Quantitative Trading Terminal UI](#prompt-61-real-time-quantitative-trading-terminal-ui)
    - [Prompt 6.2: Institutional Kill Switch Control Matrix & Modal UI](#prompt-62-institutional-kill-switch-control-matrix--modal-ui)
-8. [AI Audit, Verification & Human-in-the-Loop Refinement Log](#8-ai-audit-verification--human-in-the-loop-refinement-log)
+   - [Prompt 6.3: Automated Email Statement Modal UI](#prompt-63-automated-email-statement-modal-ui)
+8. [Auxiliary Systems & Regulatory Verification Prompts](#8-auxiliary-systems--regulatory-verification-prompts)
+   - [Prompt 7.1: TradeMint Automated Email Statement Engine (SEBI SCRA Rule 15)](#prompt-71-trademint-automated-email-statement-engine-sebi-scra-rule-15)
+   - [Prompt 7.2: Razorpay 3-Tier Subscription & Payment Gateway](#prompt-72-razorpay-3-tier-subscription--payment-gateway)
+   - [Prompt 7.3: Broker Resilience with Query-Before-Retry Engine](#prompt-73-broker-resilience-with-query-before-retry-engine)
+   - [Prompt 7.4: Comprehensive Judge Evaluation Suite](#prompt-74-comprehensive-judge-evaluation-suite)
+9. [AI Audit, Verification & Human-in-the-Loop Refinement Log](#9-ai-audit-verification--human-in-the-loop-refinement-log)
 
 ---
 
@@ -319,20 +325,29 @@ SCENARIOS TO SIMULATE & PRINT:
 Format console output with ANSI colors, step headers, and final PASS/FAIL summary table.
 ```
 
-### Prompt 5.2: Automated Pytest Suite Generation (46 Unit & Integration Tests)
+### Prompt 5.2: Automated Pytest Suite Generation (80 Unit, Integration & Judge Tests)
 
 - **Target Directory**: [`backend/tests/`](file:///c:/Users/karti/OneDrive/Desktop/codecell/Syrus7_Midnight_Coders/backend/tests)
 - **Full Verbatim Prompt**:
 ```text
-Create a comprehensive test suite across unit, integration, and failure directories targeting 100% pass rate.
+Create a comprehensive, institutional test suite spanning unit, integration, judge evaluation, and failure directories achieving a strict 100% pass rate (80/80 tests).
 
 TEST MODULES REQUIRED:
-- `test_candle_decoder.py`: Binary unpacking of TC 1, 2, 3 and 1m/5m candle aggregator boundaries.
-- `test_contract_note.py`: Integer paise statutory charge breakdown matching SEBI tax tables.
-- `test_execution_engine.py`: Order lifecycle transitions and partial fill math.
-- `test_recovery.py`: State reconciler position drift detection and orphan order cleanup.
-- `test_risk_engine.py`: Max daily loss auto-halt, position limit block, rate limiter, and sub-10s kill switch SLA.
-- `test_strategies.py`: L4 virtual sub-ledger isolation with opposing long/short positions.
+- `tests/unit/test_candle_decoder.py`: Binary unpacking of TC 1, 2, 3 and 1m/5m candle aggregator boundaries.
+- `tests/unit/test_contract_note.py`: Integer paise statutory charge breakdown matching SEBI tax tables.
+- `tests/unit/test_execution_engine.py`: Order lifecycle transitions and partial fill math.
+- `tests/unit/test_recovery.py`: State reconciler position drift detection and orphan order cleanup.
+- `tests/unit/test_risk_engine.py`: Max daily loss auto-halt, position limit block, rate limiter, and sub-10s kill switch SLA.
+- `tests/unit/test_strategies.py`: L4 virtual sub-ledger isolation with opposing long/short positions.
+- `tests/unit/test_broker_021_retries.py`: Query-Before-Retry loop under HTTP 504 and network disconnects.
+- `tests/unit/test_rate_limiter.py`: Token bucket sustained rate and burst capacity validation.
+- `tests/unit/test_resilience_and_recovery.py`: Mid-trade crash recovery and audit state checks.
+- `tests/integration/test_api_auth.py`: JWT login, registration, password hashing.
+- `tests/integration/test_api_features.py`: Orders, strategies, killswitch activation/reset, contract notes.
+- `tests/integration/test_database_and_subscriptions.py`: DB schema persistence, self-healing setup.
+- `tests/integration/test_email_model.py`: SEBI Rule 15 math, HTML generation, TLS email delivery.
+- `tests/integration/test_user_subscriptions.py`: 3-tier user access control gates.
+- `tests/judge/test_judge_evaluation.py`: Complete evaluation matrix covering multi-scope kill switch, partial fill recovery, rate limiter burst behavior, and contract note itemization.
 ```
 
 ---
@@ -367,9 +382,87 @@ FEATURES:
 4. Sub-second feedback toast showing total orders cancelled and SLA execution time.
 ```
 
+### Prompt 6.3: Automated Email Statement Modal UI
+
+- **Target File**: [`frontend/src/components/tm/EmailStatementModal.tsx`](file:///c:/Users/karti/OneDrive/Desktop/codecell/Syrus7_Midnight_Coders/frontend/src/components/tm/EmailStatementModal.tsx)
+- **Full Verbatim Prompt**:
+```text
+Implement an interactive modal allowing users to dispatch SEBI Rule 15 P&L statements directly to their email from the dashboard and top navbar.
+
+REQUIREMENTS:
+1. Recipient Input: Allow inputting any destination email address with quick preset chips for the user's registered account.
+2. Real-Time Telemetry Preview: Preview current runtime portfolio value, net P&L, available balance, and risk gate status directly inside the dialog before dispatching.
+3. Live Feedback: Provide spinner during SMTP TLS dispatch and clear delivery confirmation badge with Statement ID upon completion.
+```
+
 ---
 
-## 8. AI Audit, Verification & Human-in-the-Loop Refinement Log
+## 8. Auxiliary Systems & Regulatory Verification Prompts
+
+### Prompt 7.1: TradeMint Automated Email Statement Engine (SEBI SCRA Rule 15)
+
+- **Target File**: [`backend/app/services/email_model.py`](file:///c:/Users/karti/OneDrive/Desktop/codecell/Syrus7_Midnight_Coders/backend/app/services/email_model.py)
+- **Full Verbatim Prompt**:
+```text
+Create a 100% standalone, zero-dependency Python script (`email_model.py`) that generates and dispatches daily P&L statements compliant with SEBI SCRA Rule 15.
+
+REQUIREMENTS:
+1. Zero Third-Party Dependencies: Use only Python standard libraries (`smtplib`, `email`, `datetime`, `json`, `argparse`).
+2. Dual Email Formatting: Render a responsive dark-themed HTML table with color-coded P&L indicators, alongside an RFC-compliant plaintext fallback.
+3. Integer Paise Regulatory Breakdown: Itemize Gross P&L, Brokerage (₹20/order), STT (0.025% on sell), Exchange Txn Fees, SEBI Turnover Fees, Stamp Duty, and 18% GST down to integer paise precision.
+4. Dynamic Telemetry Alignment: Pull runtime telemetry from `get_account_summary()` (`netPnl`, `accountValue`, `availableBalance`, `riskStatus`) to guarantee 100% parity with dashboard numbers.
+5. Live Socket Resilience: Support Port 587 (STARTTLS) and Port 465 (SSL) with automatic reconnection handling.
+```
+
+### Prompt 7.2: Razorpay 3-Tier Subscription & Payment Gateway
+
+- **Target Files**: [`backend/app/api/routes.py`](file:///c:/Users/karti/OneDrive/Desktop/codecell/Syrus7_Midnight_Coders/backend/app/api/routes.py), [`backend/app/database/models/user.py`](file:///c:/Users/karti/OneDrive/Desktop/codecell/Syrus7_Midnight_Coders/backend/app/database/models/user.py)
+- **Full Verbatim Prompt**:
+```text
+Implement a 3-tier commercial subscription and monetization engine integrated with Razorpay.
+
+TIER SPECIFICATIONS:
+- Tier 1 (`tier_pro` / `u_test_all`): Unlimited execution access across all algorithmic strategies.
+- Tier 2 (`tier_standard` / `u_test_three`): Restricted to 3 core algorithms (`strat_time`, `strat_breakout`, `strat_ma`).
+- Tier 3 (`tier_free` / `u_test_none`): Read-only simulation mode. Real broker order placement is strictly blocked by paywall gate.
+
+SECURITY & VERIFICATION:
+1. Provide `/api/subscriptions/checkout` to generate order tokens.
+2. Provide `/api/subscriptions/verify-webhook` to validate `X-Razorpay-Signature` using server-side HMAC-SHA256 with `RAZORPAY_KEY_SECRET`.
+```
+
+### Prompt 7.3: Broker Resilience with Query-Before-Retry Engine
+
+- **Target File**: [`backend/app/broker/api_021.py`](file:///c:/Users/karti/OneDrive/Desktop/codecell/Syrus7_Midnight_Coders/backend/app/broker/api_021.py)
+- **Full Verbatim Prompt**:
+```text
+Harden the 021 broker client against network drops and HTTP 504 Gateway Timeouts using the Query-Before-Retry pattern.
+
+INVARIANTS:
+1. Never blindly resubmit an order following a timeout exception.
+2. Catch timeout exceptions and immediately poll `GET /orders/{client_order_id}`.
+3. If the broker has already registered the order, link internal state to `PLACED` without duplicate execution.
+4. If confirmed absent, perform exponential backoff retry.
+5. Implement a Token-Bucket rate limiter enforcing 5 requests/sec with burst capacity of 10.
+```
+
+### Prompt 7.4: Comprehensive Judge Evaluation Suite
+
+- **Target File**: [`backend/tests/judge/test_judge_evaluation.py`](file:///c:/Users/karti/OneDrive/Desktop/codecell/Syrus7_Midnight_Coders/backend/tests/judge/test_judge_evaluation.py)
+- **Full Verbatim Prompt**:
+```text
+Construct a rigorous judge evaluation test suite verifying all 6 hackathon failure categories:
+1. Partial fill state handling and working quantity preservation.
+2. Mid-trade crash recovery and position drift detection.
+3. Runaway strategy spam throttle via Level 3 Risk Gate.
+4. Risk limit breach rejection before broker submission.
+5. Broker outage 503/504 handling and state preservation.
+6. Opposing strategy positions tracking independent P&L on a flat broker account.
+```
+
+---
+
+## 9. AI Audit, Verification & Human-in-the-Loop Refinement Log
 
 | Iteration # | Target Module | Initial AI Output | Human Code Audit Finding | Refactored Verbatim Prompt / Solution |
 | :--- | :--- | :--- | :--- | :--- |
@@ -377,6 +470,10 @@ FEATURES:
 | **Iter 2** | Kill Switch SLA | Sequential cancellation loop over open orders (`for o in orders: cancel(o)`) | Execution took 4.2 seconds under 30 active orders | Re-prompted: "Refactor cancellation execution using `asyncio.gather(*[cancel(o) for o in orders])` for concurrent dispatch." Execution reduced to 180ms. |
 | **Iter 3** | Candle Aggregator | Ticks at `XX:XX:00.000` were placed into old minute candle | Caused minute boundary volume leak | Re-prompted: "Enforce strict timestamp comparison `tick.timestamp >= next_minute_boundary` to emit closed candle before appending tick to new candle." |
 | **Iter 4** | Risk Gate | Strategy could bypass risk check by instantiating raw REST client | Violated core hackathon problem statement | Re-prompted: "Enforce strict dependency injection where broker client credentials are private to the Risk Gate and unavailable to Strategy classes." |
+| **Iter 5** | Broker Client | Blind retry upon HTTP 504 Gateway Timeout | Risk of duplicate order execution on broker | Re-prompted: "Implement Query-Before-Retry loop: query `GET /orders/{id}` before executing a retry to confirm if the broker processed the original request." |
+| **Iter 6** | Email Engine | Statement computed P&L solely from strategy ledger dictionary | Telemetry discrepancy: statement showed ₹0 while dashboard showed live simulated P&L | Re-prompted: "Refactor `build_pnl_statement_data` to accept optional `account_data` from `get_account_summary()`, ensuring 100% telemetry parity between dashboard and dispatched email." |
+| **Iter 7** | Strategy Accounting | `get_average_price` accessed `buy_amt` unconditionally | Threw `KeyError: 'buy_amt'` when calculating short positions with only `sell_amt` | Re-prompted: "Support both long (`buy_amt`/`buy_val_paise`) and short (`sell_amt`/`sell_val_paise`) positions with side-aware fallback logic." |
+| **Iter 8** | SMTP Transport | Swapped `MAIL_USERNAME` and `MAIL_PASSWORD` variables in `.env` | Threw `SMTP Delivery Failed: Connection unexpectedly closed` | Re-prompted: "Correct environment variable mappings and configure standard TLS on port 587 with robust socket exception handling." |
 
 ---
 
