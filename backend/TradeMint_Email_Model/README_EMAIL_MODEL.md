@@ -10,6 +10,12 @@ A completely self-contained implementation of the **TradeMint Daily Profit & Los
 - **REST API Endpoint**: Exposed via `POST /api/reports/email-statement`.
 - **UI Terminal Integration**: Interactive frontend modal at `frontend/src/components/tm/EmailStatementModal.tsx` accessible directly from the Top Navbar and Dashboard banner.
 
+## 📸 Email Statement Preview
+
+| TradeMint SEBI Rule 15 Email Statement (P&L & Portfolio Summary) | Itemized Regulatory Charges & Trade Ledger |
+| :---: | :---: |
+| ![TradeMint Email Statement](../trademint%20ss.png) | ![TradeMint Regulatory Breakdown](../trademint%20ss1.png) |
+
 ---
 
 ## ⚡ Quick Test (Command Line)

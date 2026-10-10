@@ -14,9 +14,9 @@
 
 ## 📸 Email Preview
 
-
+| TradeMint SEBI Rule 15 Email Statement (P&L & Portfolio Summary) | Itemized Regulatory Charges & Trade Ledger |
 | :---: | :---: |
-| ![TradeMint Terminal](backend/trademint%20ss.png) | ![TradeMint Controls](backend/trademint%20ss1.png) |
+| ![TradeMint Email Statement](backend/trademint%20ss.png) | ![TradeMint Regulatory Breakdown](backend/trademint%20ss1.png) |
 
 ---
 

@@ -201,6 +201,11 @@ The platform features an automated, standalone **Profit & Loss Statement & Regul
 - **Direct Runtime Telemetry Parity**: Ingests exact account summary state (`netPnl`, `accountValue`, `availableBalance`, `riskStatus`), guaranteeing 100% telemetry alignment with the live dashboard.
 - **Live TLS/STARTTLS Socket Handling**: Supports Port 587 (STARTTLS) and Port 465 (SSL), with automatic retry and socket reconnection logic.
 
+### 📸 Email Statement Preview:
+| TradeMint SEBI Rule 15 Email Statement (P&L & Portfolio Summary) | Itemized Regulatory Charges & Trade Ledger |
+| :---: | :---: |
+| ![TradeMint Email Statement](trademint%20ss.png) | ![TradeMint Regulatory Breakdown](trademint%20ss1.png) |
+
 ### Standalone CLI Execution:
 ```bash
 python app/services/email_model.py trader@example.com
